@@ -13,6 +13,7 @@ fn valid_twin_context() -> VehicleContext {
         tyre_pressure_ok: true,
         ambient_lux: 100,
         lighting_state: crate::fsm::LightingState::Off,
+        lighting_ack_pending_since: None,
     }
 }
 

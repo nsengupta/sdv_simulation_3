@@ -82,7 +82,6 @@ Physical Car name: NASHIK-VC-001, initializing its Digital Twin ...
 [actuation-ingress @ corr CorrelationId { source_id: "...", session_id: 0, sequence_no: 1 }]: corner lights ON acknowledged (non-CAN path)
 [ACTION @ 14:19:45 355467066]: 🔇 BUZZER OFF - System Normal.
 [NASHIK-VC-001]: Transitioned to Driving
-
 ```
 
 *(The `CorrelationId` fields in the actuation line above are illustrative; the runtime prints the real `Debug` value from the controller.)*
@@ -135,21 +134,21 @@ Together, the crates demonstrate: **encode → CAN → decode → domain events 
 
 ### Crates
 
-| Crate | Role |
-|--------|------|
-| `common` | `VssSignal`, physical/digital vocabularies, projector adapters, op strategy (`transition/output`), step contract, controller runtime, default actuation manager, transition sink abstraction |
-| `emulator` | Sends simulated speed/RPM/ambient-lux telemetry at ~10 Hz |
-| `gateway` | CAN ingress + physical mapping + projection; `gateway_runtime` + `actuation_scaffold` worker wiring; thin `main` |
+| Crate      | Role                                                                                                                                                                                         |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `common`   | `VssSignal`, physical/digital vocabularies, projector adapters, op strategy (`transition/output`), step contract, controller runtime, default actuation manager, transition sink abstraction |
+| `emulator` | Sends simulated speed/RPM/ambient-lux telemetry at ~10 Hz                                                                                                                                    |
+| `gateway`  | CAN ingress + physical mapping + projection; `gateway_runtime` + `actuation_scaffold` worker wiring; thin `main`                                                                             |
 
 ### CAN mapping (concrete protocol in code)
 
 Signals use **11-bit standard IDs** and **2-byte big-endian** payloads:
 
-| Signal (concept) | CAN ID | Payload |
-|------------------|--------|---------|
-| Vehicle speed | `0x101` | `u16`, scaled: km/h × 100 (decode divides by 100) |
-| Engine RPM | `0x102` | `u16`, RPM as integer |
-| Ambient lux | `0x103` | `u16`, lux as integer |
+| Signal (concept) | CAN ID  | Payload                                           |
+| ---------------- | ------- | ------------------------------------------------- |
+| Vehicle speed    | `0x101` | `u16`, scaled: km/h × 100 (decode divides by 100) |
+| Engine RPM       | `0x102` | `u16`, RPM as integer                             |
+| Ambient lux      | `0x103` | `u16`, lux as integer                             |
 
 Unknown IDs or non-standard frames are ignored by the ingress path (unless and until the decoder
 is extended).
