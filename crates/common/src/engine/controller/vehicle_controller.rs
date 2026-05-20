@@ -2,6 +2,7 @@ use crate::digital_twin::{DigitalTwinCar, DigitalTwinCarVocabulary};
 use crate::engine::controller::actuation_contract::ActuationCommand;
 use crate::engine::connectors::{PhysicalToDigitalProjector, Projector};
 use crate::fsm::FsmEvent;
+use crate::transition_sink::RawTransitionRecord;
 use crate::PhysicalCarVocabulary;
 use ractor::rpc::CallResult;
 use ractor::{ActorRef, MessagingErr, SpawnErr};
@@ -27,6 +28,7 @@ pub struct VehicleControllerRuntimeOptions {
     pub log_timer_tick: bool,
     pub actuation_command_tx: Option<tokio::sync::mpsc::Sender<ActuationCommand>>,
     pub diagnostic_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::diagnostic::DiagnosticMessage>>,
+    pub transition_tx: Option<tokio::sync::mpsc::Sender<RawTransitionRecord>>,
 }
 
 impl Default for VehicleControllerRuntimeOptions {
@@ -35,6 +37,7 @@ impl Default for VehicleControllerRuntimeOptions {
             log_timer_tick: false,
             actuation_command_tx: None,
             diagnostic_tx: None,
+            transition_tx: None,
         }
     }
 }
@@ -64,6 +67,11 @@ impl VehicleController {
             actor,
             projector: PhysicalToDigitalProjector,
         }
+    }
+
+    /// Expose the underlying actor reference for direct message access (used in tests).
+    pub fn get_actor_ref(&self) -> &ActorRef<DigitalTwinCarVocabulary> {
+        &self.actor
     }
 
     /// Lifecycle: primary FSM enters powered operation (not representable as `PhysicalCarVocabulary` today).

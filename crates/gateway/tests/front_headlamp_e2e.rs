@@ -6,7 +6,7 @@
 //! - Verifies persisted context for ACK / NACK / timeout outcomes.
 //!
 //! Non-scope:
-//! - SocketCAN bus transport wiring (`vcan0`) and plant task process orchestration.
+//! - SocketCAN bus transport wiring (`vcan0`) and separate actuator process orchestration.
 //!   Those are covered by runtime/manual smoke scenarios and bus-level tests.
 
 use std::time::Duration;

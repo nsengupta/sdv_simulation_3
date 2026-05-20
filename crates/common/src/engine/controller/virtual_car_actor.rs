@@ -1,4 +1,4 @@
-//! Virtual ECU / gateway **actor** ([`ractor::Actor`]).
+//! Virtual ECU / gateway **actor** ([`ractor::Actor`](https://crates.io/crates/ractor/0.15.12)).
 //!
 //! ## Message layering
 //! - **[`FsmEvent`](crate::fsm::FsmEvent)** — pure FSM vocabulary: `Clone`, no I/O ports.
@@ -17,12 +17,10 @@ use crate::engine::controller::actuation_manager::{
 };
 use crate::engine::controller::vehicle_controller::VehicleControllerRuntimeOptions;
 use crate::fsm::{self, ActorModeHintFromDomain, DomainAction, FsmEvent, FsmState, VehicleContext};
-use crate::transition_sink::{RawTransitionRecord, TransitionRecordSink, TransitionSinkError};
+use crate::transition_sink::{RawTransitionRecord, TokioMpscTransitionRecordSink, TransitionRecordSink, TransitionSinkError};
 
 /// The Digital Twin Actor
-pub struct VirtualCarActor {
-    transition_sink: Option<Arc<dyn TransitionRecordSink>>,
-}
+pub struct VirtualCarActor;
 
 #[derive(Debug, Clone)]
 pub struct VirtualCarActorArgs {
@@ -51,6 +49,7 @@ pub struct VirtualCarRuntimeState {
     runtime_options: VehicleControllerRuntimeOptions,
     actuation_manager: Arc<dyn ActuationManager>,
     diagnostic_sink: Option<Arc<dyn DiagnosticSink>>,
+    transition_sink: Option<Arc<dyn TransitionRecordSink>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,18 +60,14 @@ enum ActorMode {
 
 impl Default for VirtualCarActor {
     fn default() -> Self {
-        Self {
-            transition_sink: None,
-        }
+        Self
     }
 }
 
 impl VirtualCarActor {
     #[allow(dead_code)]
-    pub fn with_transition_sink(transition_sink: Arc<dyn TransitionRecordSink>) -> Self {
-        Self {
-            transition_sink: Some(transition_sink),
-        }
+    pub fn with_transition_sink(_transition_sink: Arc<dyn TransitionRecordSink>) -> Self {
+        Self
     }
 }
 
@@ -96,6 +91,13 @@ impl Actor for VirtualCarActor {
             .clone()
             .map(|tx| Arc::new(TokioMpscDiagnosticSink::new(tx)) as Arc<dyn DiagnosticSink>);
 
+        // Wrap optional transition TX channel into a TransitionRecordSink.
+        let transition_sink: Option<Arc<dyn TransitionRecordSink>> = args
+            .runtime_options
+            .transition_tx
+            .clone()
+            .map(|tx| Arc::new(TokioMpscTransitionRecordSink::new(tx)) as Arc<dyn TransitionRecordSink>);
+
         // Emit init message if sink is available.
         if let Some(sink) = &diagnostic_sink {
             let _ = sink.try_emit(DiagnosticMessage::info(
@@ -110,16 +112,14 @@ impl Actor for VirtualCarActor {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos() as u64)
                     .unwrap_or(0);
-                let mut manager = DefaultActuationManager::with_command_channel(
+                let manager = DefaultActuationManager::with_command_channel(
                     identity.clone(),
                     session_id,
                     tx,
                 );
-                manager.set_diagnostic_sink(diagnostic_sink.clone());
                 Arc::new(manager)
             } else {
-                let mut manager = DefaultActuationManager::default();
-                manager.set_diagnostic_sink(diagnostic_sink.clone());
+                let manager = DefaultActuationManager::default();
                 Arc::new(manager)
             };
 
@@ -133,6 +133,7 @@ impl Actor for VirtualCarActor {
             runtime_options: args.runtime_options,
             actuation_manager,
             diagnostic_sink,
+            transition_sink,
         })
     }
 
@@ -161,7 +162,7 @@ impl Actor for VirtualCarActor {
                 runtime_state.twin_car.current_state = result.next_state.clone();
                 runtime_state.twin_car.context = result.modified_ctx;
 
-                self.try_emit_transition_record(runtime_state, result.transition_record);
+                Self::try_emit_transition_record(runtime_state, result.transition_record);
 
                 for action in result.actions {
                     match action {
@@ -207,11 +208,10 @@ impl Actor for VirtualCarActor {
 
 impl VirtualCarActor {
     fn try_emit_transition_record(
-        &self,
         runtime_state: &mut VirtualCarRuntimeState,
         transition_record: fsm::TransitionRecord,
     ) {
-        let Some(sink) = &self.transition_sink else {
+        let Some(sink) = &runtime_state.transition_sink else {
             return;
         };
 

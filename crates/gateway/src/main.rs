@@ -8,15 +8,17 @@ use std::env;
 mod gateway_runtime;
 mod ingress;
 
-const VIRTUAL_CAR_IDENTITY: &str = "NASHIK-VC-001";
+const VIRTUAL_CAR_IDENTITY: &str = "My-Opel-Corsa-1.4-GSi";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let print_timer_tick = env::args().any(|arg| arg == "--print-timer-tick");
+    let print_transitions = env::args().any(|arg| arg == "--print-transitions");
 
     gateway_runtime::run(gateway_runtime::GatewayLaunchConfig {
         car_identity: VIRTUAL_CAR_IDENTITY,
         print_timer_tick,
+        print_transitions,
         can_interface: gateway_runtime::DEFAULT_CAN_INTERFACE,
     })
     .await

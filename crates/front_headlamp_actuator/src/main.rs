@@ -17,9 +17,9 @@ const DEFAULT_ACK_DELAY_MS: u64 = 150;
 pub const DEFAULT_ACK_NACK_RESPONSE_PROB: f64 = 0.7;
 
 /// If set to a float in `0.0..=1.0`, the actuator randomly sends **no** ACK/NACK after the CMD.
-pub const ENV_DROP_RESPONSE_PROB: &str = "FRONT_HEADLAMP_PLANT_DROP_RESPONSE_PROB";
+pub const ENV_DROP_RESPONSE_PROB: &str = "FRONT_HEADLAMP_ACTUATOR_DROP_RESPONSE_PROB";
 /// If set to a float in `0.0..=1.0`, controls ACK-vs-NACK split **when the actuator responds** (`P(ACK)`).
-pub const ENV_ACK_NACK_RESPONSE_PROB: &str = "FRONT_HEADLAMP_PLANT_ACK_NACK_RESPONSE_PROB";
+pub const ENV_ACK_NACK_RESPONSE_PROB: &str = "FRONT_HEADLAMP_ACTUATOR_ACK_NACK_RESPONSE_PROB";
 
 fn parse_prob_env(key: &str) -> Option<f64> {
     std::env::var(key)

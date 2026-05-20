@@ -1,19 +1,193 @@
-# SDV simulation (draft)
+# SDV simulation — repository overview
 
-Rust workspace that simulates a small **vehicle data path** inspired by **VSS (Vehicle Signal Specification)** ideas: telemetry is modeled as named signals, encoded on **SocketCAN**, and consumed by a **gateway** that hosts a **digital twin** (FSM + actor) and orchestrates **front-headlamp** actuation over the bus.
+A Rust workspace that prototypes a **software-defined vehicle control path**: telemetry and actuation on a **shared CAN bus**, a **gateway** that translates wire traffic into domain events, and a **digital twin** that maintains vehicle state, decides when to actuate, and closes the loop when the body ECU acknowledges (or fails).
 
-This is a hands-on learning / demo project, not production software.
+This is an educational / demonstrator codebase, not a product stack.
 
-## Requirements
+**Companion narrative:** blog post *Prototyping a Software Defined Vehicle — Stage 2* (`Prototype-Software-Defined-Vehicle-2` in the author’s blog source) — walks from the earlier two-process model (gateway + emulator, in-process headlamp) to the bus-backed arrangement documented here.
 
-- **Linux** with SocketCAN (typical for `vcan` or real CAN hardware).
-- **Rust** toolchain compatible with the workspace (edition 2024).
+**This README** is the repo landing page: what is implemented **now**, key decisions, limits, and how to run — for readers who already know SDV vocabulary (VSS-shaped signals, gateways, digital twins, body ECUs).
 
-## How to run (Linux quick start)
+---
 
-`vcan0` is the default interface; all three binaries use it in code.
+## What exists in this version
 
-**Setup** (once per boot, requires `sudo`):
+The prototype answers a narrow but realistic question: *can we treat the CAN bus as the single nervous system between simulated ECUs and a twin that both consumes telemetry and commands actuators with correlated feedback?*
+
+**Three processes** share Linux **SocketCAN** (`vcan0` by default):
+
+| Process                     | Role                                                                                                                                    |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **emulator**                | Stand-in for powertrain + ambient-light sensing: publishes **engine RPM** and **ambient lux** on CAN (~10 Hz).                          |
+| **gateway**                 | Owns ingress (read CAN), **projection** into twin vocabulary, the **digital twin** runtime, and egress (write headlamp **CMD** frames). |
+| **front_headlamp_actuator** | Stand-in body ECU: receives CMD, replies with **ACK** or **NACK** on the same bus (~150 ms later).                                      |
+
+Inside the gateway, the twin is **not** a loose script: it is a **`VirtualCarActor`** (mailbox, single-threaded handling) driving an **FSM** plus an orthogonal **lighting** sub-state in `VehicleContext`. Outcomes are visible on **stdout** — a deliberate stand-in for a dashboard or cloud stream (state transitions, actuation intents, alerts, headlamp correlation).
+
+Signals are modeled in a **VSS-inspired** Rust enum (`EngineRpm`, `AmbientLux`, and a decoded-but-unused `VehicleSpeed` slot for a future observed-speed ECU). Payload layout and headlamp wire kinds live in **`vehicle_device_bus`** so the gateway stays thin and the actuator binary stays independent.
+
+---
+
+## Current Architecture
+
+Telemetry and commands meet on one virtual CAN interface; the gateway is the only component that speaks both “wire” and “twin.”
+
+![SDV prototype — emulator, gateway (digital twin), front-headlamp actuator, and vcan0](diagrams/SDV-Blog-Inputs-4.jpg)
+
+*Architecture diagram (Stage 2 blog figure). Local copy: [`diagrams/SDV-Blog-Inputs-4.jpg`](diagrams/SDV-Blog-Inputs-4.jpg).*
+
+**Ingress path:** CAN frame → `VssSignal` / headlamp payload → `PhysicalCarVocabulary` → `PhysicalToDigitalProjector` → `DigitalTwinCarVocabulary` → actor → `fsm::step`.
+
+**Egress path:** `DomainAction` (e.g. request headlamp ON) → `DefaultActuationManager` → `ActuationCommand` → gateway encodes CMD → CAN → actuator → ACK/NACK → same reader thread → policy correlation → twin ACK/NACK/incomplete events.
+
+---
+
+## Key design decisions
+
+**Gateway as orchestrator, not as actuator.** Earlier iterations simulated the headlamp inside the gateway over Tokio channels. Here the gateway **writes CMD and reads ACK/NACK on CAN**, matching how a real SDV stack would separate body ECUs from the service platform.
+
+**Twin in `common`, gateway as runtime shell.** FSM rules (`transition_map`), the `step` boundary, kinematics, thresholds, and the actor live in **`common`** so tests and contracts stay deterministic without sockets. **`gateway_runtime`** only wires CAN, timers, and channels.
+
+**Layered vocabulary.** Physical ingress uses **Confirmed/Rejected** for actuator outcomes; the FSM uses **OnAck/OffAck** and **ActuationIncomplete** (timeout vs negative ACK). That keeps wire semantics separate from twin semantics and mirrors gateway projection patterns you would keep in production.
+
+**Speed is derived, not sensed on the bus (yet).** The emulator does not publish speed. One composite **RPM** is scaled to km/h in `vehicle_kinematics` (`rpm × 0.114`, simple tire model) on every `step`. A `VehicleSpeed` frame (`0x101`) can be decoded but is **rejected** at projection until an observed-speed path exists — kinematic expectation vs ECU measurement stay explicit.
+
+**Operational warning uses OR + AND semantics.** Enter **`ExtremeOperationWarning`** when derived **speed > 160 km/h** *or* when **speed > 160 and RPM > 5500** (commuter “fast” vs “sustained stress”). Recovery needs a **5 s** cooldown and both conditions cleared. Buzzer and log lines reflect which threshold fired.
+
+**Lighting is orthogonal context, not a top-level FSM state.** Lux hysteresis (`LUX_ON` 840 / `LUX_OFF` 860, demo-tuned against ~815–885 lux jitter) drives `LightingState` (Off → OnRequested → On → …) while primary states remain Off / Idle / Driving / ExtremeOperationWarning. Pending states suppress duplicate CMDs; **2 s** ACK waits surface timeout recovery on `TimerTick`.
+
+**Device policy in `vehicle_device_bus`.** Correlation (session/sequence) and “ignore command frames on ingress” live with the codec so adding another actuated device follows the same checklist.
+
+**Observability is human-first.** Structured logging is a TODO; demo runs rely on timestamped `println`/`eprintln` and a small emoji vocabulary in `front_headlamp_log` (📤 command, ✅ ACK, ❌ NACK, ⏱️ timeout).
+
+---
+
+## Digital twin: actor + FSM
+
+The twin runtime is **`VirtualCarActor`**, a [`ractor`](https://crates.io/crates/ractor/0.15.12) **actor** — not a shared mutable object that the gateway updates directly. The gateway (via **`VehicleController`**) sends **`DigitalTwinCarVocabulary`** messages to the actor’s mailbox; each message is handled **one at a time** in `handle`, which calls the pure **`fsm::step`** boundary and then runs side effects.
+
+**Why an actor:**
+
+| Benefit                      | In this repo                                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Encapsulated state**       | `DigitalTwinCar` (`FsmState` + `VehicleContext`) lives only inside the actor; ingress and timers do not race on context.                    |
+| **Async, ordered handling**  | CAN-derived events, `TimerTick`, power on/off, and `GetStatus` RPCs are all **messages** — same queue, deterministic serial processing.     |
+| **Separation of concerns**   | FSM code stays **pure** (`step`, `transition_map`); the actor owns **I/O** (actuation channel, logs, optional transition/diagnostic sinks). |
+| **Stable platform boundary** | Gateway speaks **vocabulary + `ActorRef`**, not FSM internals — closer to how a vehicle service would target a twin API.                    |
+| **Room to grow**             | Child actors, supervision, or backpressure on actuation can attach to the mailbox model without rewriting the FSM.                          |
+
+Mailbox shape: **`Fsm(FsmEvent)`** for telemetry and control; **`GetStatus`** for snapshot queries (reply port). That keeps the FSM event set small while the runtime vocabulary can extend.
+
+### Vehicle states in this prototype
+
+The car’s **operational mode** is a single primary FSM (`FsmState`). What you see in logs as `Transitioned to …` and in cloud sync as `VehicleState` maps from these four values:
+
+| State                         | Meaning                                                                                                                                                                                                    |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`Off`**                     | Ignition off. Twin does not treat the vehicle as running; derived speed is forced to **0**; lighting context is cleared to **Off**.                                                                        |
+| **`Idle`**                    | Powered on (`PowerOn` with healthy context), engine at rest — not in the “driving” band (RPM ≤ 1000 after the last update).                                                                                |
+| **`Driving`**                 | Powered on and **RPM > 1000** while derived speed is non-zero. Normal motion band for the demo.                                                                                                            |
+| **`ExtremeOperationWarning`** | Stress band active: derived **speed > 160 km/h** and/or **speed > 160 km/h with RPM > 5500**. Buzzer on; recovers to **Driving** or **Idle** after a **5 s** cooldown once thresholds clear (`TimerTick`). |
+
+Typical primary flow:
+
+```text
+Off ──PowerOn──► Idle ◄──speed=0── Driving
+                  ▲                    │
+                  │                    │ operational_warning_active
+                  └──── speed=0 ───────┤
+                                       ▼
+                          ExtremeOperationWarning
+                                       │
+                          (cooldown + thresholds clear)
+                                       ▼
+                                 Driving or Idle
+```
+
+**Separate from the four modes above**, front-headlamp progress is tracked in **`LightingState`** inside `VehicleContext` (not extra top-level FSM states):
+
+| Lighting state     | Meaning                                                                      |
+| ------------------ | ---------------------------------------------------------------------------- |
+| **`Off`**          | Headlamp treated as off; may request ON when lux ≤ `LUX_ON_THRESHOLD` (840). |
+| **`OnRequested`**  | CMD sent (or queued); waiting for ACK or timeout.                            |
+| **`On`**           | ACK received; may request OFF when lux ≥ `LUX_OFF_THRESHOLD` (860).          |
+| **`OffRequested`** | OFF CMD in flight; waiting for ACK or timeout.                               |
+
+So at any instant the twin holds **one primary mode** plus **one lighting sub-state** — e.g. `Driving` + `On` while cruising with headlamps confirmed on.
+
+### Per-message processing (inside `handle`)
+
+1. **Apply** the event to context (RPM, lux, headlamp ACK/NACK/incomplete, power, timer).
+2. **Refresh** derived speed from RPM; force speed 0 when ignition is Off.
+3. **Transition** primary FSM via `transition_map` and collect `FsmAction`s via `output` (buzzer, cloud sync, warnings).
+4. **Evaluate** lighting rules and emit `RequestFrontHeadlampOn/Off` when thresholds cross.
+5. **Handle** lighting timeouts on `TimerTick`.
+6. **Execute** domain actions (including forwarding actuation commands to the gateway’s CMD channel).
+
+Primary drive logic (simplified): power on → Idle; RPM above idle band → Driving; zero derived speed → Idle; operational thresholds → ExtremeOperationWarning with recovery on heartbeat ticks.
+
+---
+
+## Intentional shortcomings
+
+| Area              | Current choice                                          | Why it matters                                                                  |
+| ----------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **VSS**           | Local `VssSignal` enum, not COVESA catalog / databroker | Fast iteration; mapping to real VSS paths is future work.                       |
+| **Kinematics**    | Single RPM → speed multiplier                           | No four-wheel model, slip, gear, or observed-speed fusion.                      |
+| **Lux scale**     | High values (~850), narrow hysteresis                   | Tuned so headlamp ON/OFF cycles often in a demo run, not photometric night/day. |
+| **Interface**     | `vcan0` hardcoded in three binaries                     | No CLI/env yet; fine for Ubuntu + SocketCAN labs.                               |
+| **Dashboard**     | stdout only                                             | No Zenoh, MQTT, or HMI; `PublishStateSync` is a log stub.                       |
+| **Gateway scope** | One reader thread, one actuator device                  | No multi-bus, no security, no routing tables.                                   |
+| **Speed on CAN**  | Decoded, not consumed                                   | Deliberate separation until ECU path is designed.                               |
+
+These are documented as **non-goals for the milestone**, not oversights.
+
+---
+
+## Software map
+
+| Crate                         | Responsibility                                                                                                                                                                         |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`common`**                  | VSS encode/decode, vocabularies, projection, FSM + `step`, `VirtualCarActor`, `VehicleController`, actuation manager, `vehicle_constants`, `vehicle_kinematics`, `front_headlamp_log`. |
+| **`vehicle_device_bus`**      | Front-headlamp CAN codec, wire kinds, ingress policy.                                                                                                                                  |
+| **`emulator`**                | World models (RPM target tracking, lux jitter/tunnels) → telemetry frames.                                                                                                             |
+| **`gateway`**                 | `main` + `gateway_runtime`: install twin, CAN loop, timer tick, CMD TX.                                                                                                                |
+| **`front_headlamp_actuator`** | Blocking actuator loop on CMD with configurable drop/NACK probabilities.                                                                                                               |
+
+Canonical FSM table: `crates/common/src/engine/op_strategy/transition_map.rs`. Lighting contract tests: `crates/common/src/test/lighting_step_contract.rs`.
+
+---
+
+## Wire protocol (reference)
+
+**Telemetry** — 11-bit standard IDs, 2-byte big-endian:
+
+| Signal        | ID      | Notes                        |
+| ------------- | ------- | ---------------------------- |
+| Vehicle speed | `0x101` | Decoded; **not** fed to twin |
+| Engine RPM    | `0x102` | Ingress → `UpdateRpm`        |
+| Ambient lux   | `0x103` | Ingress → `UpdateAmbientLux` |
+
+**Front headlamp** — ID `0x204`, kinds in `vehicle_device_bus` (CMD / ACK / NACK for ON and OFF paths).
+
+---
+
+## Tests
+
+```bash
+cargo test -p common
+cargo test -p gateway --lib
+cargo test -p vehicle_device_bus
+cargo test -p common --features proptest   # optional
+```
+
+Bus integration tests need `vcan0` up: `cargo test -p vehicle_device_bus --test front_headlamp_bus_e2e`, `cargo test -p gateway --test front_headlamp_e2e`.
+
+---
+
+## How to run (Linux)
+
+**Requirements:** Linux with SocketCAN, Rust (workspace edition 2024).
 
 ```bash
 sudo modprobe vcan
@@ -21,226 +195,53 @@ sudo ip link add dev vcan0 type vcan 2>/dev/null || true
 sudo ip link set up vcan0
 ```
 
-**Start** (three shells, no `sudo`):
+Three terminals:
 
 ```bash
 cargo run -p emulator
-```
-
-```bash
 cargo run -p front_headlamp_actuator
-```
-
-```bash
 cargo run -p gateway
 ```
 
-Optional gateway flag for heartbeat logs:
+Optional gateway heartbeat:
 
 ```bash
 cargo run -p gateway -- --print-timer-tick
 ```
 
-**Teardown** after `Ctrl+C` in each shell:
+**Actuator with demo env** (same terminal B instead of plain `cargo run` — values must be in `0.0`..=`1.0`):
 
 ```bash
-sudo ip link del vcan0
+FRONT_HEADLAMP_ACTUATOR_DROP_RESPONSE_PROB=0.15 \
+FRONT_HEADLAMP_ACTUATOR_ACK_NACK_RESPONSE_PROB=0.5 \
+cargo run -p front_headlamp_actuator
 ```
 
-To use another interface, change `DEFAULT_CAN_INTERFACE` in `crates/emulator/src/main.rs`, `crates/front_headlamp_actuator/src/main.rs`, and `crates/gateway/src/gateway_runtime.rs`.
+| Variable                                         | Example | Effect                                                                      |
+| ------------------------------------------------ | ------- | --------------------------------------------------------------------------- |
+| `FRONT_HEADLAMP_ACTUATOR_DROP_RESPONSE_PROB`     | `0.15`  | ~15% of CMDs get **no** ACK/NACK on CAN (gateway may log `⏱️` timeout).     |
+| `FRONT_HEADLAMP_ACTUATOR_ACK_NACK_RESPONSE_PROB` | `0.5`   | When the actuator **does** respond, P(ACK)=0.5 (default if unset: **0.7**). |
 
-## What you should see
+Default actuator (no env): `cargo run -p front_headlamp_actuator` — always responds after ~150 ms, ~70% ACK / ~30% NACK.
 
-| Process | Role |
-| -------- | ----- |
-| **emulator** | Publishes **engine RPM** and **ambient lux** on CAN (~10 Hz). Prints derived speed in debug only (not on the bus). |
-| **front_headlamp_actuator** | Listens for headlamp **CMD** frames; responds with **ACK/NACK** after ~150 ms (configurable drop/NACK via env). |
-| **gateway** | Runs the digital twin, ingests telemetry + headlamp responses, emits **CMD** on CAN when the twin requests lighting. |
+**Teardown:** `Ctrl+C` each process; `sudo ip link del vcan0`.
 
-**Gateway logs (representative):**
+Change `DEFAULT_CAN_INTERFACE` in emulator, actuator, and `gateway_runtime` if not using `vcan0`.
 
-- State transitions: `[NASHIK-VC-001]: Transitioned to …`
-- Cloud sync: `📡 Publishing to Cloud: …`
-- Headlamp **commands**: `📤🔆 Requesting front headlamp ON.` / `📤🌑 … OFF.`
-- Headlamp **ingress**: `[actuation-can-ingress …]: ✅💡 … confirmed` / `❌🔆 … rejected (NACK)`
-- **Alerts** (timeout): `[ALERT …]: ⏱️💡 … no actuator response (timed out).`
-- **Stress**: `🔊 BUZZER ON` / speed or extreme-operation alert lines when thresholds are exceeded
-
-**Actuator** (when it receives CMDs): `received ON CMD` / `OFF CMD`, then ACK or NACK on the wire.
-
-**Emulator debug line (example):**
-
-```text
-DEBUG: Time=33s | CompositeRPM=6388 (Target=6500) | DerivedSpeedKph=728.23 | AmbientLux=842
-```
-
-TimerTick lines on the gateway are **off** unless `--print-timer-tick` is set.
-
-### Demo actuation (optional env)
-
-On the actuator process:
-
-- `FRONT_HEADLAMP_PLANT_DROP_RESPONSE_PROB` — probability of no frame after CMD (simulate silent bus).
-- `FRONT_HEADLAMP_PLANT_ACK_NACK_RESPONSE_PROB` — when responding, probability of ACK vs NACK (default `0.7` ACK).
-
-## Workspace layout
-
-| Crate | Role |
-| ----- | ---- |
-| `common` | VSS signals, physical/digital vocabularies, projection, FSM (`step`, `transition_map`), `VirtualCarActor`, actuation manager, vehicle constants/kinematics, `front_headlamp_log` icons |
-| `vehicle_device_bus` | Shared CAN payload codec, wire kinds, and **front_headlamp** policy (correlation, pending command) |
-| `emulator` | Virtual ECU: RPM + lux models → CAN telemetry |
-| `gateway` | Thin `main`; `gateway_runtime` — CAN reader thread, ingress, twin controller, CMD publisher |
-| `front_headlamp_actuator` | Standalone body ECU binary |
-
-Block diagrams (Mermaid): `blog-inputs/diagrams/05-sdv-architecture-block.mmd`, `06-digital-twin-fsm-inset.mmd`.
-
-## End-to-end data path
-
-```text
-emulator ──RPM, lux──► vcan0 ◄──CMD / ACK|NACK── front_headlamp_actuator
-                          │
-                          ▼
-                    gateway (CAN reader)
-                          │
-          PhysicalCarVocabulary → PhysicalToDigitalProjector
-                          │
-                          ▼
-                 VirtualCarActor (mailbox)
-                          │
-                    fsm::step → transition_map
-                          │
-              DomainAction → ActuationManager → CMD on vcan0
-```
-
-**Ingress today:** `EngineRpm`, `AmbientLux`, `TimerTick`, `SystemReset`, front-headlamp **Confirmed/Rejected** (from CAN ACK/NACK). **Observed speed** on CAN (`VehicleSpeed`, ID `0x101`) is decoded but **rejected** at projection; the twin **derives** `VehicleContext::speed` from RPM in `step()` via `vehicle_kinematics`.
-
-## Digital twin (inside gateway)
-
-- **`VehicleController`** — installs `VirtualCarActor`, runs `PhysicalToDigitalProjector`, submits events.
-- **`VirtualCarActor`** — holds `DigitalTwinCar` (`FsmState` + `VehicleContext`), calls `fsm::step`, executes `DomainAction` via `DefaultActuationManager`.
-- **FSM helpers** (called from `step`):
-  - `engine::op_strategy::transition_map` — `transition` / `output`
-  - `vehicle_kinematics` — `calculate_speed_from_rpm`, `refresh_context_speed`
-  - `vehicle_constants` — RPM/lux/speed thresholds, ACK wait durations
-- **Lighting** — orthogonal `LightingState` in context; lux hysteresis; ACK wait / timeout / NACK recovery in `step`.
-
-## Primary FSM (`Off` | `Idle` | `Driving` | `ExtremeOperationWarning`)
-
-Canonical rules: `crates/common/src/engine/op_strategy/transition_map.rs`.
-
-| Transition | Condition |
-| ---------- | ----------- |
-| `Off` → `Idle` | `PowerOn` and healthy context |
-| `Idle` → `Driving` | `UpdateRpm` > 1000 |
-| `Driving` → `Idle` | Derived `speed == 0` (after kinematic refresh in `step`) |
-| `Driving` → `ExtremeOperationWarning` | **Operational warning** active (see below) |
-| `ExtremeOperationWarning` → `Driving` / `Idle` | `TimerTick`, 5 s cooldown elapsed, warning cleared; `Idle` if `speed == 0` |
-
-### Operational warning (speed + RPM)
-
-Constants in `vehicle_constants.rs`:
-
-| Constant | Value | Meaning |
-| -------- | ----- | -------- |
-| `SPEED_EXTREME_OPERATION_THRESHOLD_KPH` | 160 | Derived speed above this contributes to warning |
-| `RPM_EXTREME_OPERATION_THRESHOLD` | 5500 | RPM above this (with speed) = extreme-operation pair |
-
-**Enter `ExtremeOperationWarning`** when **either**:
-
-1. **Speed alone** — derived `speed` > 160 km/h → `SpeedThresholdExceeded` alert (+ buzzer), or  
-2. **Extreme operation** — `speed` > 160 **and** `rpm` > 5500 → `ExtremeOperationWarning` alert (+ buzzer); both alerts if both apply.
-
-**Recovery:** after `RPM_STRESS_DURATION_THRESHOLD_SECS` (5 s), leave warning when **neither** condition holds (`operational_warning_active` is false).
-
-**Kinematics:** `speed` (km/h, `u16`) is computed from wheel/composite RPM (`rpm × 0.114`, tire model in `vehicle_kinematics`); not clamped to 255. Ignition `Off` forces `speed = 0` in `step`.
-
-## Front headlamp + ambient lux
-
-### Thresholds (demo-calibrated)
-
-| Constant | Value | Effect |
-| -------- | ----- | ------ |
-| `LUX_ON_THRESHOLD` | 840 | `Off` + lux ≤ 840 → request ON |
-| `LUX_OFF_THRESHOLD` | 860 | `On` + lux ≥ 860 → request OFF |
-| Deadband | 841–859 | Hold current lighting state |
-
-Emulator profile (`daytime_tunnel_profile`): baseline ~850 lux, jitter ±35 (~815–885), occasional tunnel dips — intended to cross ON/OFF often in one run. This is **demo tuning**, not literal night lux.
-
-### Lighting sub-states
-
-`Off` → `OnRequested` → `On` → `OffRequested` → `Off` (ACK-driven). Pending states suppress duplicate CMD intents. **Timeout** (2 s, `FRONT_HEADLAMP_*_ACK_WAIT`) and **NACK** map to `FrontHeadlampActuationIncomplete` with recovery in `step`.
-
-### Vocabulary layers
-
-| Layer | ON success | OFF success | Failure |
-| ----- | ---------- | ----------- | ------- |
-| CAN / physical | Confirmed | Confirmed | Rejected |
-| FSM event | `FrontHeadlampOnAck` | `FrontHeadlampOffAck` | `FrontHeadlampActuationIncomplete` |
-
-Policy and correlation: `vehicle_device_bus::devices::front_headlamp::policy`.
-
-### Log icons (`common::front_headlamp_log`)
-
-| Situation | Icon | Message constant |
-| --------- | ---- | ---------------- |
-| Command ON | `📤🔆` | `MSG_REQUEST_ON` |
-| Command OFF | `📤🌑` | `MSG_REQUEST_OFF` |
-| ACK ON | `✅💡` | `MSG_ACK_ON` |
-| ACK OFF | `✅🌑` | `MSG_ACK_OFF` |
-| NACK ON | `❌🔆` | `MSG_NACK_ON` |
-| NACK OFF | `❌🌑` | `MSG_NACK_OFF` |
-| Timeout ON | `⏱️💡` | `MSG_TIMEOUT_ON` |
-| Timeout OFF | `⏱️🌑` | `MSG_TIMEOUT_OFF` |
-
-## CAN mapping (telemetry + headlamp)
-
-Standard 11-bit IDs, 2-byte big-endian payloads for telemetry:
-
-| Signal | ID | Payload |
-| ------ | --- | -------- |
-| Vehicle speed (future ECU) | `0x101` | km/h × 100 — **not** used by twin today |
-| Engine RPM | `0x102` | `u16` RPM |
-| Ambient lux | `0x103` | `u16` lux |
-
-Front headlamp actuation (`vehicle_device_bus`, ID **`0x204`**): CMD / ACK / NACK kinds in `devices/front_headlamp/codec`; gateway egress encodes CMD; reader thread decodes ACK/NACK into `PhysicalCarVocabulary`.
-
-Unknown IDs are ignored by the telemetry decoder until extended.
-
-## Tests
-
-```bash
-# Unit / contract tests (no vcan required)
-cargo test -p common
-cargo test -p gateway --lib
-cargo test -p vehicle_device_bus
-
-# Optional property tests
-cargo test -p common --features proptest
-
-# Bus e2e (requires vcan0)
-cargo test -p vehicle_device_bus --test front_headlamp_bus_e2e
-cargo test -p gateway --test front_headlamp_e2e
-```
-
-## Dependencies (not exhaustive)
-
-- **`socketcan`** — CAN on Linux  
-- **`tokio`** (gateway) — async runtime, channels, timers  
-- **`ractor`** (common) — `VirtualCarActor` mailbox  
-- **`anyhow`** — binaries  
-- **`rand`** (emulator) — world-model jitter  
-
-## Future work (ideas)
-
-- CLI/env for CAN interface on all binaries  
-- Observed-speed ECU path wired through projection (separate from kinematic expectation)  
-- Configurable emulator profiles (day / tunnel / night) at startup  
-- DBC- or ARXML-driven signal catalog  
-- Additional devices under `vehicle_device_bus::devices`  
-- Structured logging/metrics instead of println demo lines  
-- Transport adapters (Zenoh / uProtocol) reusing the same twin and policy core  
+**What a successful run looks like:** emulator debug lines with RPM/lux; gateway transitions and `📤🔆` / `📤🌑` commands; actuator `received ON/OFF CMD`; gateway `[actuation-can-ingress …]` with `✅💡` / `✅🌑` or `❌🔆` / `❌🌑`; occasional `⏱️` alerts if the actuator drops responses; buzzer lines if RPM/speed thresholds are exceeded.
 
 ---
 
-*This README is a **draft**; update it when user-visible behavior or milestones change.*
+## Dependencies (summary)
+
+`socketcan`, `tokio` (gateway), [`ractor`](https://crates.io/crates/ractor/0.15.12) (actor), `anyhow`, `rand` (emulator models).
+
+---
+
+## Roadmap (ideas, not commitments)
+
+Observed-speed ECU ingress; official VSS / databroker alignment; CLI CAN interface; richer emulator profiles; DBC-driven IDs; structured telemetry egress; additional `vehicle_device_bus` devices; Zenoh or uProtocol adapters reusing the same twin and policy core.
+
+---
+
+*Update this file when user-visible behaviour or repo layout changes; keep the blog as the narrative arc, this README as the current truth.*

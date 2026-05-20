@@ -25,6 +25,7 @@ const ACTUATION_COMMAND_CHANNEL_CAPACITY: usize = 64;
 pub struct GatewayLaunchConfig<'a> {
     pub car_identity: &'a str,
     pub print_timer_tick: bool,
+    pub print_transitions: bool,
     pub can_interface: &'a str,
 }
 
@@ -46,11 +47,27 @@ pub async fn run(launch: GatewayLaunchConfig<'_>) -> Result<()> {
     let (diag_tx, diag_rx) = mpsc::unbounded_channel();
     let _diag_observer = spawn_stdout_diagnostic_observer(diag_rx);
 
+    // Transition channel: twin emits RawTransitionRecord, optionally printed to stdout.
+    let transition_tx = if launch.print_transitions {
+        let (tx, mut rx) = mpsc::channel::<common::RawTransitionRecord>(256);
+        tokio::spawn(async move {
+            while let Some(record) = rx.recv().await {
+                println!(
+                    "[transition] car={} seq={} {:?}",
+                    record.car_identity, record.sequence_no, record.transition
+                );
+            }
+        });
+        Some(tx)
+    } else {
+        None
+    };
+
     let runtime_options = VehicleControllerRuntimeOptions {
         log_timer_tick: launch.print_timer_tick,
         actuation_command_tx: Some(actuation_cmd_tx),
         diagnostic_tx: Some(diag_tx),
-        ..VehicleControllerRuntimeOptions::default()
+        transition_tx,
     };
 
     let (controller, _join) = VehicleController::install_and_start_with_options(
@@ -82,6 +99,9 @@ pub async fn run(launch: GatewayLaunchConfig<'_>) -> Result<()> {
     );
     if launch.print_timer_tick {
         println!("[gateway] TimerTick heartbeat logging enabled (--print-timer-tick)");
+    }
+    if launch.print_transitions {
+        println!("[gateway] FSM transition logging enabled (--print-transitions)");
     }
 
     let (can_tx, can_rx) = mpsc::unbounded_channel();
