@@ -30,10 +30,9 @@ Signals are modeled in a **VSS-inspired** Rust enum (`EngineRpm`, `AmbientLux`, 
 
 Screen capture of a live three-process run on `vcan0` (emulator, gateway, front-headlamp actuator). The gateway log shows FSM transitions, lux-driven headlamp CMD/ACK/NACK, and operational warnings — the same stdout surface described above.
 
-<video controls autoplay muted loop playsinline style="max-width: 100%;">
-  <source src="assets/digital-twin-output.mp4" type="video/mp4">
-  <a href="assets/digital-twin-output.mp4">Download the digital-twin demo video</a>
-</video>
+https://github.com/nsengupta/sdv_simulation/raw/main/assets/digital-twin-output.mp4
+
+*GitHub renders the line above as an inline player. Local clone: [`assets/digital-twin-output.mp4`](assets/digital-twin-output.mp4).*
 
 ---
 
