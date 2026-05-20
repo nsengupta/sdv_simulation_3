@@ -26,6 +26,15 @@ Inside the gateway, the twin is **not** a loose script: it is a **`VirtualCarAct
 
 Signals are modeled in a **VSS-inspired** Rust enum (`EngineRpm`, `AmbientLux`, and a decoded-but-unused `VehicleSpeed` slot for a future observed-speed ECU). Payload layout and headlamp wire kinds live in **`vehicle_device_bus`** so the gateway stays thin and the actuator binary stays independent.
 
+### Demo recording
+
+Screen capture of a live three-process run on `vcan0` (emulator, gateway, front-headlamp actuator). The gateway log shows FSM transitions, lux-driven headlamp CMD/ACK/NACK, and operational warnings — the same stdout surface described above.
+
+<video controls autoplay muted loop playsinline style="max-width: 100%;">
+  <source src="assets/digital-twin-output.mp4" type="video/mp4">
+  <a href="assets/digital-twin-output.mp4">Download the digital-twin demo video</a>
+</video>
+
 ---
 
 ## Current Architecture
@@ -228,7 +237,7 @@ Default actuator (no env): `cargo run -p front_headlamp_actuator` — always res
 
 Change `DEFAULT_CAN_INTERFACE` in emulator, actuator, and `gateway_runtime` if not using `vcan0`.
 
-**What a successful run looks like:** emulator debug lines with RPM/lux; gateway transitions and `📤🔆` / `📤🌑` commands; actuator `received ON/OFF CMD`; gateway `[actuation-can-ingress …]` with `✅💡` / `✅🌑` or `❌🔆` / `❌🌑`; occasional `⏱️` alerts if the actuator drops responses; buzzer lines if RPM/speed thresholds are exceeded.
+**What a successful run looks like:** same as the [demo recording](#demo-recording) above — emulator debug lines with RPM/lux; gateway transitions and `📤🔆` / `📤🌑` commands; actuator `received ON/OFF CMD`; gateway `[actuation-can-ingress …]` with `✅💡` / `✅🌑` or `❌🔆` / `❌🌑`; occasional `⏱️` alerts if the actuator drops responses; buzzer lines if RPM/speed thresholds are exceeded.
 
 ---
 
