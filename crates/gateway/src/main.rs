@@ -14,11 +14,13 @@ const VIRTUAL_CAR_IDENTITY: &str = "My-Opel-Corsa-1.4-GSi";
 async fn main() -> Result<()> {
     let print_timer_tick = env::args().any(|arg| arg == "--print-timer-tick");
     let print_transitions = env::args().any(|arg| arg == "--print-transitions");
+    let trace_actuation_ingress = env::args().any(|arg| arg == "--trace-actuation-ingress");
 
     gateway_runtime::run(gateway_runtime::GatewayLaunchConfig {
         car_identity: VIRTUAL_CAR_IDENTITY,
         print_timer_tick,
         print_transitions,
+        trace_actuation_ingress,
         can_interface: gateway_runtime::DEFAULT_CAN_INTERFACE,
     })
     .await

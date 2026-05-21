@@ -26,6 +26,8 @@ pub struct GatewayLaunchConfig<'a> {
     pub car_identity: &'a str,
     pub print_timer_tick: bool,
     pub print_transitions: bool,
+    /// Log ignored headlamp ingress (e.g. command-frame echo on shared CAN). Off by default for demos.
+    pub trace_actuation_ingress: bool,
     pub can_interface: &'a str,
 }
 
@@ -103,11 +105,17 @@ pub async fn run(launch: GatewayLaunchConfig<'_>) -> Result<()> {
     if launch.print_transitions {
         println!("[gateway] FSM transition logging enabled (--print-transitions)");
     }
+    if launch.trace_actuation_ingress {
+        println!(
+            "[gateway] actuation ingress trace enabled (--trace-actuation-ingress; ignored CMD/correlation lines)"
+        );
+    }
 
     let (can_tx, can_rx) = mpsc::unbounded_channel();
     let _can_reader = spawn_can_reader_thread(
         launch.can_interface.to_string(),
         front_headlamp_policy,
+        launch.trace_actuation_ingress,
         can_tx,
     )?;
     run_can_ingress_dispatch_loop(controller, can_rx).await
@@ -127,6 +135,7 @@ fn spawn_timer_tick_loop(controller: VehicleController) {
 fn spawn_can_reader_thread(
     can_interface: String,
     front_headlamp_policy: Arc<Mutex<FrontHeadlampPolicy>>,
+    trace_actuation_ingress: bool,
     tx: mpsc::UnboundedSender<CanIngressEnvelope>,
 ) -> Result<JoinHandle<()>> {
     let socket = CanSocket::open(&can_interface)?;
@@ -179,10 +188,12 @@ fn spawn_can_reader_thread(
                             }
                         }
                         FrontHeadlampPolicyDecision::Ignore(reason) => {
-                            eprintln!(
-                                "[actuation-can-ingress ignored]: reason={reason} session={} seq={}",
-                                payload.session_id, payload.sequence_no
-                            );
+                            if trace_actuation_ingress {
+                                eprintln!(
+                                    "[actuation-can-ingress trace ignored]: reason={reason} session={} seq={}",
+                                    payload.session_id, payload.sequence_no
+                                );
+                            }
                         }
                     }
                 }
