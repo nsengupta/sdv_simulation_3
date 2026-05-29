@@ -45,8 +45,8 @@ async fn controller_fsm_front_headlamp_ack_path() {
         .get_snapshot(Some(Duration::from_millis(300)))
         .await
         .expect("snapshot");
-    assert_eq!(snapshot.context.lighting_state, LightingState::On);
-    assert!(snapshot.context.lighting_ack_pending_since.is_none());
+    assert_eq!(snapshot.context.headlamp.state, LightingState::On);
+    assert!(snapshot.context.headlamp.ack_pending_since.is_none());
 }
 
 #[tokio::test]
@@ -77,8 +77,8 @@ async fn controller_fsm_front_headlamp_nack_path() {
         .get_snapshot(Some(Duration::from_millis(300)))
         .await
         .expect("snapshot");
-    assert_eq!(snapshot.context.lighting_state, LightingState::Off);
-    assert!(snapshot.context.lighting_ack_pending_since.is_none());
+    assert_eq!(snapshot.context.headlamp.state, LightingState::Off);
+    assert!(snapshot.context.headlamp.ack_pending_since.is_none());
 }
 
 #[tokio::test]
@@ -110,6 +110,6 @@ async fn controller_fsm_front_headlamp_no_response_timeout_path() {
         .get_snapshot(Some(Duration::from_millis(300)))
         .await
         .expect("snapshot");
-    assert_eq!(snapshot.context.lighting_state, LightingState::Off);
-    assert!(snapshot.context.lighting_ack_pending_since.is_none());
+    assert_eq!(snapshot.context.headlamp.state, LightingState::Off);
+    assert!(snapshot.context.headlamp.ack_pending_since.is_none());
 }

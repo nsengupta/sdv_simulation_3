@@ -46,13 +46,13 @@ async fn scenario_raw_transition_records_are_emitted_in_order() {
     assert_eq!(first.transition.event, FsmEvent::PowerOn);
     assert_eq!(first.transition.old_state, FsmState::Off);
     assert_eq!(first.transition.next_state, FsmState::Idle);
-    assert_eq!(first.transition.current_ctx.rpm, 0);
+    assert_eq!(first.transition.current_ctx.powertrain.wheel_rpm.front_left, 0);
 
     assert_eq!(second.sequence_no, 2);
     assert_eq!(second.transition.event, FsmEvent::UpdateRpm(1500));
     assert_eq!(second.transition.old_state, FsmState::Idle);
     assert_eq!(second.transition.next_state, FsmState::Driving);
-    assert_eq!(second.transition.current_ctx.rpm, 1500);
+    assert_eq!(second.transition.current_ctx.powertrain.wheel_rpm.front_left, 1500);
 
     let twin_snapshot = actor_ref
         .call(

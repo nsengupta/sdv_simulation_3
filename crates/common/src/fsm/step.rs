@@ -14,37 +14,15 @@
 //! - `actions`: pure domain intents (no hardware/network calls).
 //! - `transition_record`: audit snapshot for observability/replay.
 //!
-//! Boundary rule:
-//! - Domain emits [`ActorModeHintFromDomain`]; runtime actor owns `ActorMode` and mailbox behavior.
+//! Orchestration only:
+//! - Per-assembly data mutation + derivation lives on the assemblies
+//!   (`crate::fsm::assembly`); `step` decides *when* to invoke them, runs the
+//!   operational FSM, and maps results into [`DomainAction`].
 
-use super::machineries::{
-    FrontHeadlampIncompleteCause, FrontHeadlampSwitchDirection, FsmAction, FsmEvent, FsmState,
-    LightingState, VehicleContext,
-};
+use super::assembly::VehicleContext;
+use super::machineries::{ActorModeHintFromDomain, DomainAction, FsmAction, FsmEvent, FsmState};
 use crate::engine::op_strategy::transition_map::{output, transition, TransitionNote};
-use crate::vehicle_constants::{
-    FRONT_HEADLAMP_OFF_ACK_WAIT, FRONT_HEADLAMP_ON_ACK_WAIT, LUX_OFF_THRESHOLD, LUX_ON_THRESHOLD,
-};
-use crate::front_headlamp_log;
-use crate::vehicle_kinematics::refresh_context_speed;
-use std::time::{Duration, Instant};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActorModeHintFromDomain {
-    Normal,
-    Transitioning,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum DomainAction {
-    StartBuzzer,
-    StopBuzzer,
-    PublishStateSync,
-    LogWarning(String),
-    RequestFrontHeadlampOn,
-    RequestFrontHeadlampOff,
-    EnterMode(ActorModeHintFromDomain),
-}
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransitionRecord {
@@ -71,29 +49,26 @@ pub fn step(
     now: Instant,
 ) -> StepResult {
     let mut modified_ctx = current_ctx.clone();
+
+    // 1. Dispatch the event to the owning assembly.
     match event {
-        FsmEvent::UpdateRpm(rpm) => modified_ctx.rpm = *rpm,
-        FsmEvent::UpdateAmbientLux(lux) => modified_ctx.ambient_lux = *lux,
-        FsmEvent::FrontHeadlampOnAck => {
-            modified_ctx.lighting_state = LightingState::On;
-            modified_ctx.lighting_ack_pending_since = None;
-        }
-        FsmEvent::FrontHeadlampOffAck => {
-            modified_ctx.lighting_state = LightingState::Off;
-            modified_ctx.lighting_ack_pending_since = None;
-        }
+        FsmEvent::UpdateRpm(rpm) => modified_ctx.powertrain.apply_rpm(*rpm),
+        FsmEvent::UpdateAmbientLux(lux) => modified_ctx.visibility.apply_lux(*lux),
+        FsmEvent::FrontHeadlampOnAck => modified_ctx.headlamp.apply_on_ack(),
+        FsmEvent::FrontHeadlampOffAck => modified_ctx.headlamp.apply_off_ack(),
         FsmEvent::FrontHeadlampActuationIncomplete { .. }
         | FsmEvent::PowerOn
         | FsmEvent::PowerOff
         | FsmEvent::TimerTick => {}
     }
 
-    refresh_context_speed(&mut modified_ctx);
-    // Ignition off: kinematic speed is not meaningful; keep standstill for invariants.
+    // 2. Powertrain derivation; ignition off holds standstill for invariants.
+    modified_ctx.powertrain.refresh_speed();
     if *current_state == FsmState::Off {
-        modified_ctx.speed = 0;
+        modified_ctx.powertrain.freeze_standstill();
     }
 
+    // 3. Operational FSM.
     let transition_result = transition(current_state, event, &modified_ctx, now);
     let next_state = transition_result.next_state.clone();
     let mut actions: Vec<DomainAction> = output(current_state, &next_state, &modified_ctx)
@@ -113,33 +88,25 @@ pub fn step(
         }
     }
 
-    match (&current_ctx.lighting_state, event) {
-        (LightingState::Off, FsmEvent::UpdateAmbientLux(lux)) if *lux <= LUX_ON_THRESHOLD => {
-            modified_ctx.lighting_state = LightingState::OnRequested;
-            modified_ctx.lighting_ack_pending_since = Some(now);
-            actions.push(DomainAction::RequestFrontHeadlampOn);
-        }
-        (LightingState::On, FsmEvent::UpdateAmbientLux(lux)) if *lux >= LUX_OFF_THRESHOLD => {
-            modified_ctx.lighting_state = LightingState::OffRequested;
-            modified_ctx.lighting_ack_pending_since = Some(now);
-            actions.push(DomainAction::RequestFrontHeadlampOff);
-        }
-        _ => {}
+    // 4. Headlamp side-effects (logic owned by the assembly; orchestrated here).
+    if let FsmEvent::UpdateAmbientLux(lux) = event {
+        modified_ctx
+            .headlamp
+            .evaluate_lux(current_ctx.headlamp.state, *lux, now, &mut actions);
     }
-
     if matches!(event, FsmEvent::TimerTick) {
-        try_front_headlamp_ack_timeout(&mut modified_ctx, now, &mut actions);
+        modified_ctx.headlamp.on_timer_tick(now, &mut actions);
     }
-
     if let FsmEvent::FrontHeadlampActuationIncomplete { direction, cause } = event {
-        try_recover_front_headlamp_incomplete(&mut modified_ctx, *direction, *cause, &mut actions);
+        modified_ctx
+            .headlamp
+            .on_incomplete(*direction, *cause, &mut actions);
     }
-
     if matches!(next_state, FsmState::Off) {
-        modified_ctx.lighting_state = LightingState::Off;
-        modified_ctx.lighting_ack_pending_since = None;
+        modified_ctx.headlamp.reset_for_ignition_off();
     }
 
+    // 5. Actor-mode hint from the resulting operational state.
     if matches!(next_state, FsmState::ExtremeOperationWarning(_)) {
         actions.push(DomainAction::EnterMode(ActorModeHintFromDomain::Transitioning));
     } else {
@@ -168,71 +135,5 @@ fn map_fsm_action(action: FsmAction) -> Option<DomainAction> {
         FsmAction::PublishStateSync => Some(DomainAction::PublishStateSync),
         FsmAction::LogWarning(msg) => Some(DomainAction::LogWarning(msg)),
         FsmAction::None => None,
-    }
-}
-
-fn ack_wait_elapsed(since: Instant, now: Instant, wait: Duration) -> bool {
-    now.saturating_duration_since(since) >= wait
-}
-
-/// If we have been waiting for an ON/OFF ACK too long, revert to a safe lighting state and log.
-fn try_front_headlamp_ack_timeout(
-    modified_ctx: &mut VehicleContext,
-    now: Instant,
-    actions: &mut Vec<DomainAction>,
-) {
-    let Some(since) = modified_ctx.lighting_ack_pending_since else {
-        return;
-    };
-    match modified_ctx.lighting_state {
-        LightingState::OnRequested if ack_wait_elapsed(since, now, FRONT_HEADLAMP_ON_ACK_WAIT) => {
-            try_recover_front_headlamp_incomplete(
-                modified_ctx,
-                FrontHeadlampSwitchDirection::On,
-                FrontHeadlampIncompleteCause::TimedOut,
-                actions,
-            );
-        }
-        LightingState::OffRequested
-            if ack_wait_elapsed(since, now, FRONT_HEADLAMP_OFF_ACK_WAIT) =>
-        {
-            try_recover_front_headlamp_incomplete(
-                modified_ctx,
-                FrontHeadlampSwitchDirection::Off,
-                FrontHeadlampIncompleteCause::TimedOut,
-                actions,
-            );
-        }
-        _ => {}
-    }
-}
-
-/// Recover from a failed front-headlamp command when `direction` matches the pending request.
-fn try_recover_front_headlamp_incomplete(
-    modified_ctx: &mut VehicleContext,
-    direction: FrontHeadlampSwitchDirection,
-    cause: FrontHeadlampIncompleteCause,
-    actions: &mut Vec<DomainAction>,
-) {
-    let matches_pending = matches!(
-        (modified_ctx.lighting_state, direction),
-        (LightingState::OnRequested, FrontHeadlampSwitchDirection::On)
-            | (LightingState::OffRequested, FrontHeadlampSwitchDirection::Off)
-    );
-    if !matches_pending {
-        return;
-    }
-
-    modified_ctx.lighting_ack_pending_since = None;
-    let warning = front_headlamp_log::alert_incomplete(direction, cause);
-    match direction {
-        FrontHeadlampSwitchDirection::On => {
-            modified_ctx.lighting_state = LightingState::Off;
-            actions.push(DomainAction::LogWarning(warning));
-        }
-        FrontHeadlampSwitchDirection::Off => {
-            modified_ctx.lighting_state = LightingState::On;
-            actions.push(DomainAction::LogWarning(warning));
-        }
     }
 }

@@ -1,8 +1,8 @@
-use crate::fsm::machineries::{FsmAction, FsmEvent, FsmState, VehicleContext};
+use crate::fsm::machineries::{FsmAction, FsmEvent, FsmState};
+use crate::fsm::VehicleContext;
 use crate::vehicle_constants::{
-    extreme_operation_active, operational_warning_active, speed_threshold_exceeded,
-    EXTREME_OPERATION_WARNING_MESSAGE, RPM_STRESS_DURATION_THRESHOLD_SECS,
-    SPEED_THRESHOLD_WARNING_MESSAGE,
+    extreme_operation_active, speed_threshold_exceeded, EXTREME_OPERATION_WARNING_MESSAGE,
+    RPM_STRESS_DURATION_THRESHOLD_SECS, SPEED_THRESHOLD_WARNING_MESSAGE,
 };
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 /// - Off + PowerOn(healthy ctx) -> Idle
 /// - Idle + PowerOff -> Off
 /// - Idle + UpdateRpm(rpm > 1000) -> Driving
-/// - Driving + derived ctx.speed == 0 -> Idle (any event, after kinematic refresh in `step`)
+/// - Driving + derived ctx.powertrain.speed_kph == 0 -> Idle (any event, after kinematic refresh in `step`)
 /// - Driving + speed > 160 km/h **or** (speed > 160 and RPM > 5500) -> ExtremeOperationWarning(now)
 /// - ExtremeOperationWarning + TimerTick + cooldown + all signals cleared -> Driving/Idle
 /// - Everything else -> stay in current state
@@ -57,15 +57,15 @@ pub fn transition(
         },
         Driving => match event {
             PowerOff => TransitionResult { next_state: Driving, note: Some(TransitionNote::RejectedPowerOff) },
-            _ if operational_warning_active(current_ctx.rpm, current_ctx.speed) => {
+            _ if current_ctx.powertrain.is_operational_warning_active() => {
                 TransitionResult { next_state: ExtremeOperationWarning(now), note: None }
             }
-            _ if current_ctx.speed == 0 => TransitionResult { next_state: Idle, note: None },
+            _ if current_ctx.powertrain.is_stationary() => TransitionResult { next_state: Idle, note: None },
             _ => TransitionResult { next_state: Driving, note: None },
         },
         ExtremeOperationWarning(began_at) => match event {
             TimerTick if operational_warning_recovery_ready(*began_at, now, current_ctx) => {
-                let next_state = if current_ctx.speed == 0 { Idle } else { Driving };
+                let next_state = if current_ctx.powertrain.is_stationary() { Idle } else { Driving };
                 TransitionResult { next_state, note: None }
             }
             PowerOff => TransitionResult { next_state: ExtremeOperationWarning(*began_at), note: Some(TransitionNote::RejectedPowerOff) },
@@ -79,7 +79,7 @@ fn operational_warning_recovery_ready(began_at: Instant, now: Instant, ctx: &Veh
         .checked_duration_since(began_at)
         .unwrap_or(Duration::ZERO);
     warning_age >= Duration::from_secs(RPM_STRESS_DURATION_THRESHOLD_SECS)
-        && !operational_warning_active(ctx.rpm, ctx.speed)
+        && !ctx.powertrain.is_operational_warning_active()
 }
 
 pub fn output(old_state: &FsmState, new_state: &FsmState, ctx: &VehicleContext) -> Vec<FsmAction> {
@@ -89,10 +89,10 @@ pub fn output(old_state: &FsmState, new_state: &FsmState, ctx: &VehicleContext) 
     match (old_state, new_state) {
         (Driving, ExtremeOperationWarning(_)) => {
             let mut actions = vec![StartBuzzer];
-            if speed_threshold_exceeded(ctx.speed) {
+            if speed_threshold_exceeded(ctx.powertrain.speed_kph) {
                 actions.push(LogWarning(SPEED_THRESHOLD_WARNING_MESSAGE.to_string()));
             }
-            if extreme_operation_active(ctx.rpm, ctx.speed) {
+            if extreme_operation_active(ctx.powertrain.primary_rpm(), ctx.powertrain.speed_kph) {
                 actions.push(LogWarning(EXTREME_OPERATION_WARNING_MESSAGE.to_string()));
             }
             actions

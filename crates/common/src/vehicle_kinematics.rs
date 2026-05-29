@@ -1,7 +1,7 @@
 //! Wheel RPM → ground speed (kinematic expectation for the digital twin).
 //!
 //! Input RPM is the bus-level value from one wheel (or a composite treated as wheel RPM).
-//! Future ECUs may publish observed speed separately; until then the twin derives `VehicleContext::speed`
+//! Future ECUs may publish observed speed separately; until then the twin derives `VehicleContext::powertrain.speed_kph`
 //! from `rpm` in [`crate::fsm::step`] via [`calculate_speed_from_rpm`].
 
 use crate::fsm::VehicleContext;
@@ -13,7 +13,7 @@ const RPM_TO_KMH_MULTIPLIER: f64 = 0.114;
 ///
 /// Assumes perfect traction and a standard tire radius (~0.303 m). Returns the uncapped
 /// kinematic value (no artificial 255 km/h limit). [`refresh_context_speed`] stores the
-/// rounded value in [`VehicleContext::speed`] as `u16`.
+/// rounded value in [`VehicleContext::powertrain.speed_kph`] as `u16`.
 ///
 /// When observed-speed ECUs exist (slip, clutch, gear), they can supply a separate measurement;
 /// compare against this kinematic expectation in policy / invariants.
@@ -22,10 +22,12 @@ pub fn calculate_speed_from_rpm(rpm: u16) -> f64 {
     speed_kmh.max(0.0)
 }
 
-/// Refresh [`VehicleContext::speed`] (km/h) from latest [`VehicleContext::rpm`].
+/// Refresh derived speed (km/h) from the latest wheel RPM.
+///
+/// Thin wrapper that delegates to the powertrain assembly, which owns the
+/// derivation. Retained so existing call sites stay unchanged in Step 1.
 pub fn refresh_context_speed(ctx: &mut VehicleContext) {
-    let kph = calculate_speed_from_rpm(ctx.rpm).round();
-    ctx.speed = kph.min(f64::from(u16::MAX)) as u16;
+    ctx.powertrain.refresh_speed();
 }
 
 #[cfg(test)]
@@ -56,8 +58,8 @@ mod tests {
     #[test]
     fn refresh_stores_rounded_kph_in_context() {
         let mut ctx = VehicleContext::default();
-        ctx.rpm = 3000;
+        ctx.powertrain.wheel_rpm.front_left = 3000;
         refresh_context_speed(&mut ctx);
-        assert_eq!(ctx.speed, 342);
+        assert_eq!(ctx.powertrain.speed_kph, 342);
     }
 }

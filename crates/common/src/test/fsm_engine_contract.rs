@@ -9,26 +9,18 @@ use crate::vehicle_kinematics::refresh_context_speed;
 use std::time::{Duration, Instant};
 
 fn ctx_with_rpm(rpm: u16) -> VehicleContext {
-    let mut ctx = VehicleContext {
-        rpm,
-        ..VehicleContext::default()
-    };
+    let mut ctx = VehicleContext::default();
+    ctx.powertrain.wheel_rpm.front_left = rpm;
+    ctx.powertrain.wheel_rpm.front_right = rpm;
+    ctx.powertrain.wheel_rpm.rear_left = rpm;
+    ctx.powertrain.wheel_rpm.rear_right = rpm;
     refresh_context_speed(&mut ctx);
     ctx
 }
 
 /// Healthy `VehicleContext` matching a valid digital twin (same values as `VehicleContext::default()`).
 fn valid_twin_context() -> VehicleContext {
-    VehicleContext {
-        rpm: 0,
-        speed: 0,
-        fuel_level: 85,
-        oil_pressure: 30,
-        tyre_pressure_ok: true,
-        ambient_lux: 100,
-        lighting_state: crate::fsm::LightingState::Off,
-        lighting_ack_pending_since: None,
-    }
+    VehicleContext::default()
 }
 
 #[test]
@@ -40,8 +32,8 @@ fn test_transition_and_output_extreme_operation_emits_both_signals() {
 
     let overspeed_ctx = ctx_with_rpm(5600);
     assert!(extreme_operation_active(
-        overspeed_ctx.rpm,
-        overspeed_ctx.speed
+        overspeed_ctx.powertrain.wheel_rpm.front_left,
+        overspeed_ctx.powertrain.speed_kph
     ));
 
     let warning = transition(&driving.next_state, &FsmEvent::UpdateRpm(5600), &overspeed_ctx, now);
@@ -65,9 +57,9 @@ fn test_transition_high_speed_alone_emits_speed_threshold_signal_only() {
 
     let rpm = 3600u16;
     let fast_ctx = ctx_with_rpm(rpm);
-    assert!(fast_ctx.speed > SPEED_EXTREME_OPERATION_THRESHOLD_KPH);
-    assert!(fast_ctx.rpm <= RPM_EXTREME_OPERATION_THRESHOLD);
-    assert!(!extreme_operation_active(fast_ctx.rpm, fast_ctx.speed));
+    assert!(fast_ctx.powertrain.speed_kph > SPEED_EXTREME_OPERATION_THRESHOLD_KPH);
+    assert!(fast_ctx.powertrain.wheel_rpm.front_left <= RPM_EXTREME_OPERATION_THRESHOLD);
+    assert!(!extreme_operation_active(fast_ctx.powertrain.wheel_rpm.front_left, fast_ctx.powertrain.speed_kph));
 
     let warning = transition(&driving.next_state, &FsmEvent::UpdateRpm(rpm), &fast_ctx, now);
     assert!(matches!(warning.next_state, FsmState::ExtremeOperationWarning(_)));
@@ -127,8 +119,8 @@ fn test_warning_recovery_requires_cooldown_and_cleared_thresholds() {
 
     let still_extreme_ctx = ctx_with_rpm(6200);
     assert!(extreme_operation_active(
-        still_extreme_ctx.rpm,
-        still_extreme_ctx.speed
+        still_extreme_ctx.powertrain.wheel_rpm.front_left,
+        still_extreme_ctx.powertrain.speed_kph
     ));
     let still_warning = transition(
         &warning,

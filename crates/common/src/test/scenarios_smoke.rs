@@ -89,7 +89,7 @@ async fn scenario_rpm_input_ignored_when_ignition_off() {
 
     let car = get_snapshot(&actor, DEFAULT_ACTOR_TIMEOUT).await;
     assert_eq!(car.current_state, FsmState::Off);
-    assert_eq!(car.context.rpm, 3000);
+    assert_eq!(car.context.powertrain.wheel_rpm.front_left, 3000);
     car.verify_all_invariants()
         .expect("Safety breach on invalid input");
 }

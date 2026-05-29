@@ -2,7 +2,7 @@
 //! over `engine::op_strategy::transition_map`.
 
 use crate::engine::op_strategy::transition_map;
-use crate::fsm::{output, transition, FsmAction, FsmEvent, FsmState, LightingState, VehicleContext};
+use crate::fsm::{output, transition, FsmAction, FsmEvent, FsmState, VehicleContext};
 use crate::vehicle_constants::{
     EXTREME_OPERATION_WARNING_MESSAGE, SPEED_THRESHOLD_WARNING_MESSAGE,
 };
@@ -10,23 +10,14 @@ use crate::vehicle_kinematics::refresh_context_speed;
 use std::time::Instant;
 
 fn valid_twin_context() -> VehicleContext {
-    VehicleContext {
-        rpm: 0,
-        speed: 0,
-        fuel_level: 85,
-        oil_pressure: 30,
-        tyre_pressure_ok: true,
-        ambient_lux: 100,
-        lighting_state: LightingState::Off,
-        lighting_ack_pending_since: None,
-    }
+    VehicleContext::default()
 }
 
 #[test]
 fn given_driving_when_high_rpm_then_shim_and_strategy_transition_match() {
     let now = Instant::now();
     let mut ctx = valid_twin_context();
-    ctx.rpm = 5600;
+    ctx.powertrain.wheel_rpm.front_left = 5600;
     refresh_context_speed(&mut ctx);
 
     let via_shim = transition(&FsmState::Driving, &FsmEvent::UpdateRpm(5600), &ctx, now);
@@ -40,7 +31,7 @@ fn given_driving_when_high_rpm_then_shim_and_strategy_transition_match() {
 fn given_driving_when_both_extreme_thresholds_exceeded_then_enters_warning() {
     let now = Instant::now();
     let mut ctx = valid_twin_context();
-    ctx.rpm = 5600;
+    ctx.powertrain.wheel_rpm.front_left = 5600;
     refresh_context_speed(&mut ctx);
 
     let via_shim = transition(&FsmState::Driving, &FsmEvent::UpdateRpm(5600), &ctx, now);

@@ -8,16 +8,7 @@ use crate::vehicle_constants::{
 use std::time::{Duration, Instant};
 
 fn valid_twin_context() -> VehicleContext {
-    VehicleContext {
-        rpm: 0,
-        speed: 0,
-        fuel_level: 85,
-        oil_pressure: 30,
-        tyre_pressure_ok: true,
-        ambient_lux: 100,
-        lighting_state: crate::fsm::LightingState::Off,
-        lighting_ack_pending_since: None,
-    }
+    VehicleContext::default()
 }
 
 #[test]
@@ -32,7 +23,7 @@ fn test_step_derive_ctx_and_warning_flow() {
         Instant::now(),
     );
     assert_eq!(warmup.next_state, FsmState::Driving);
-    assert_eq!(warmup.modified_ctx.rpm, 1200);
+    assert_eq!(warmup.modified_ctx.powertrain.wheel_rpm.front_left, 1200);
 
     current_state = warmup.next_state;
     current_ctx = warmup.modified_ctx;
@@ -43,7 +34,7 @@ fn test_step_derive_ctx_and_warning_flow() {
         &FsmEvent::UpdateRpm(5600),
         Instant::now(),
     );
-    assert_eq!(warning.modified_ctx.rpm, 5600);
+    assert_eq!(warning.modified_ctx.powertrain.wheel_rpm.front_left, 5600);
     assert!(matches!(
         warning.next_state,
         FsmState::ExtremeOperationWarning(_)
@@ -68,7 +59,7 @@ fn test_step_high_speed_below_rpm_threshold_still_warns_on_speed() {
         &FsmEvent::UpdateRpm(3600),
         Instant::now(),
     );
-    assert_eq!(result.modified_ctx.rpm, 3600);
+    assert_eq!(result.modified_ctx.powertrain.wheel_rpm.front_left, 3600);
     assert!(matches!(
         result.next_state,
         FsmState::ExtremeOperationWarning(_)
@@ -110,7 +101,7 @@ fn test_step_warning_recovery_on_tick_uses_passed_time() {
     let base = Instant::now();
     let ctx = {
         let mut c = valid_twin_context();
-        c.rpm = 1000;
+        c.powertrain.wheel_rpm.front_left = 1000;
         crate::vehicle_kinematics::refresh_context_speed(&mut c);
         c
     };
