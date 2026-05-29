@@ -56,7 +56,7 @@ pub async fn run(launch: GatewayLaunchConfig<'_>) -> Result<()> {
             while let Some(record) = rx.recv().await {
                 println!(
                     "[transition] car={} seq={} {:?}",
-                    record.car_identity, record.sequence_no, record.transition
+                    record.car_identity, record.record_seq, record.transition
                 );
             }
         });

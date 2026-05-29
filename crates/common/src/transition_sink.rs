@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublishedTransitionRecord {
     pub car_identity: String,
-    pub sequence_no: u64,
+    pub record_seq: u64,
     pub transition: RawTransitionRecord,
 }
 

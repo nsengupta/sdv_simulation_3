@@ -385,21 +385,21 @@ work-item = one focused commit, subject prefixed with the ID (e.g.
 | WI-5 | Reclassify `LogWarning` toward diagnostic sink | Q5 | pending | — |
 | WI-6 | Test helper `(controller, actuation_rx)` + ack-injection | Q2 | pending | — |
 | WI-7a | Type renames `TransitionRecord`→`RawTransitionRecord`, old `RawTransitionRecord`→`PublishedTransitionRecord` | Q4, Q7 | **DONE (uncommitted)** | — |
-| WI-7b | Field rename `PublishedTransitionRecord.sequence_no`→`record_seq` (a1: leave `CorrelationId` as-is) | Q4, Q7 | pending | WI-7a |
+| WI-7b | Field rename `PublishedTransitionRecord.sequence_no`→`record_seq` (a1: leave `CorrelationId` as-is) | Q4, Q7 | **DONE** | WI-7a |
 | WI-8 | Single-writer ledger actor owns `record_seq` | Q7 | actorification | WI-7b |
 | WI-9 | Correlation IDs end-to-end (action→command→feedback→record) | Q4, Q9 | actorification | WI-1, WI-7b |
 | WI-10 | State-transition diagnostics as a projection of the ledger | Q1 | actorification | — |
 | WI-11 | Move buzzer/egress I/O into actuation child actor | Q5 | actorification | WI-1 |
 
-### WI-7b scope (next, agreed a1)
+### WI-7b scope (DONE, agreed a1)
 
-Rename **only** the ledger field; do not touch `CorrelationId` or any
-`vehicle_device_bus` wire `sequence_no` (that's the command/wire axis).
+Renamed **only** the ledger field; `CorrelationId` and all `vehicle_device_bus`
+wire `sequence_no` (the command/wire axis) left intact.
 - `transition_sink.rs` — `PublishedTransitionRecord.sequence_no` → `record_seq`.
 - `virtual_car_actor.rs` — generator `next_sequence_no` → `next_record_seq`; struct init uses `record_seq`.
-- `gateway_runtime.rs:59` — `record.sequence_no` → `record.record_seq` (leave `:194` `payload.sequence_no`, that's CAN wire).
-- `test/actor_contract.rs:45,51` — `.sequence_no` → `.record_seq`.
-- Acceptance: workspace builds; `cargo test -p common` green.
+- `gateway_runtime.rs` — `record.sequence_no` → `record.record_seq` (left `payload.sequence_no`, that's CAN wire).
+- `test/actor_contract.rs` — `.sequence_no` → `.record_seq`.
+- Acceptance met: workspace builds; all 71 `cargo test -p common` green.
 
 Deferred to WI-4 (per (b)): Counter-A session/epoch.
 

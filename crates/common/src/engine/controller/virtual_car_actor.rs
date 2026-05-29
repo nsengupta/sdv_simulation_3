@@ -45,7 +45,7 @@ impl From<&str> for VirtualCarActorArgs {
 
 pub struct VirtualCarRuntimeState {
     twin_car: DigitalTwinCar,
-    next_sequence_no: u64,
+    next_record_seq: u64,
     runtime_options: VehicleControllerRuntimeOptions,
     actuation_manager: Arc<dyn ActuationManager>,
     diagnostic_sink: Option<Arc<dyn DiagnosticSink>>,
@@ -129,7 +129,7 @@ impl Actor for VirtualCarActor {
                 current_state: FsmState::Off,
                 context: VehicleContext::default(),
             },
-            next_sequence_no: 1,
+            next_record_seq: 1,
             runtime_options: args.runtime_options,
             actuation_manager,
             diagnostic_sink,
@@ -215,12 +215,12 @@ impl VirtualCarActor {
             return;
         };
 
-        let sequence_no = runtime_state.next_sequence_no;
-        runtime_state.next_sequence_no = runtime_state.next_sequence_no.saturating_add(1);
+        let record_seq = runtime_state.next_record_seq;
+        runtime_state.next_record_seq = runtime_state.next_record_seq.saturating_add(1);
 
         let raw = PublishedTransitionRecord {
             car_identity: runtime_state.twin_car.identity.clone(),
-            sequence_no,
+            record_seq,
             transition: transition_record,
         };
 
