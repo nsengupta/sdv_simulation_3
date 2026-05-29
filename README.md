@@ -1,4 +1,10 @@
-# SDV simulation — repository overview
+# SDV simulation (Iteration 2)— repository overview
+
+----
+↩️ Looking for the fundamentals? This project builds upon the architecture established in the 
+*Iteration 1* [Repository](https://github.com/nsengupta/sdv_simulation_1).
+
+---- 
 
 A Rust workspace that prototypes a **software-defined vehicle control path**: telemetry and actuation on a **shared CAN bus**, a **gateway** that translates wire traffic into domain events, and a **digital twin** that maintains vehicle state, decides when to actuate, and closes the loop when the body ECU acknowledges (or fails).
 
@@ -71,6 +77,8 @@ Telemetry and commands meet on one virtual CAN interface; the gateway is the onl
 **Device policy in `vehicle_device_bus`.** Correlation (session/sequence) and “ignore command frames on ingress” live with the codec so adding another actuated device follows the same checklist.
 
 **Observability is human-first.** Structured logging is a TODO; demo runs rely on timestamped `println`/`eprintln` and a small emoji vocabulary in `front_headlamp_log` (📤 command, ✅ ACK, ❌ NACK, ⏱️ timeout).
+
+**The transition log records intended actions.** Each `RawTransitionRecord` carries the domain actions the pure `step` emitted (buzzer, cloud sync, warnings, headlamp requests) as an owned, filtered snapshot for observability/replay. `EnterMode` (a runtime actor hint, not a domain intent) is excluded, and these are *intended* intents — **not** execution outcomes (ACK/timeout/failure stay separate facts). The clone is deliberate over a borrow/`Arc`: the record is published across an async channel and must own its payload, and a step emits only 0–3 actions. See `docs/design-notes-runtime-observation.md`.
 
 ---
 

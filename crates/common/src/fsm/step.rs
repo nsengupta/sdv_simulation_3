@@ -32,6 +32,14 @@ pub struct RawTransitionRecord {
     pub next_state: FsmState,
     pub old_ctx: VehicleContext,
     pub current_ctx: VehicleContext,
+    /// Domain actions this step *intended* (the observability/replay projection).
+    ///
+    /// These are emitted intents from the pure step (deterministic) — **not** execution
+    /// outcomes (ACK / timeout / failure are separate facts). [`DomainAction::EnterMode`]
+    /// is deliberately excluded: it is a runtime control hint for the actor, not a domain
+    /// intent. This is an owned, filtered clone of [`StepResult::actions`]; see WI-1 in
+    /// `docs/design-notes-runtime-observation.md` for why a clone (not a borrow or `Arc`).
+    pub actions: Vec<DomainAction>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +121,16 @@ pub fn step(
         actions.push(DomainAction::EnterMode(ActorModeHintFromDomain::Normal));
     }
 
+    // Ledger projection of the emitted actions (WI-1). `StepResult::actions` stays the
+    // unfiltered execution feed (the actor needs `EnterMode` to set its mode); the record
+    // gets an owned, filtered clone. The clone is trivial (a step emits 0–3 actions) and a
+    // borrow/`Arc` is intentionally avoided — see docs/design-notes-runtime-observation.md.
+    let recorded_actions: Vec<DomainAction> = actions
+        .iter()
+        .filter(|action| !matches!(action, DomainAction::EnterMode(_)))
+        .cloned()
+        .collect();
+
     StepResult {
         next_state: next_state.clone(),
         modified_ctx: modified_ctx.clone(),
@@ -124,6 +142,7 @@ pub fn step(
             next_state,
             old_ctx: current_ctx.clone(),
             current_ctx: modified_ctx,
+            actions: recorded_actions,
         },
     }
 }

@@ -378,7 +378,7 @@ work-item = one focused commit, subject prefixed with the ID (e.g.
 
 | ID | Title | Questions | Status | Depends on |
 |----|-------|-----------|--------|------------|
-| WI-1 | Record emitted actions in `RawTransitionRecord` | Q4, Q5, Q9 | pending | WI-7a |
+| WI-1 | Record emitted actions in `RawTransitionRecord` | Q4, Q5, Q9 | **DONE** | WI-7a |
 | WI-2 | Public pure state-law checker + journey fold | Q6 | pending | — |
 | WI-3 | `Clock` seam in runtime options | Q7, Q8 | pending | — |
 | WI-4 | `as_of_seq` snapshot stamp + Counter-A session/epoch | Q3, Q7 | pending | WI-7b |
@@ -390,6 +390,48 @@ work-item = one focused commit, subject prefixed with the ID (e.g.
 | WI-9 | Correlation IDs end-to-end (action→command→feedback→record) | Q4, Q9 | actorification | WI-1, WI-7b |
 | WI-10 | State-transition diagnostics as a projection of the ledger | Q1 | actorification | — |
 | WI-11 | Move buzzer/egress I/O into actuation child actor | Q5 | actorification | WI-1 |
+
+### WI-1 scope (DONE, Option A — owned, filtered clone)
+
+Record the **intended** domain actions emitted by the pure step into the transition
+record, so the ledger shows what the FSM decided to do (resolves Q4; makes the no-op
+`StartBuzzer`/`StopBuzzer`/`PublishStateSync`/`LogWarning` observable — Q5; feeds Q6/Q9).
+
+Decision trail (why Option A, not a reference or `Arc`):
+- A **reference** (`RawTransitionRecord` borrowing `StepResult.actions`) is rejected: it
+  would be a self-referential struct (sibling fields of one `StepResult`), and the
+  published record is sent through an async mpsc channel so it must **own** its data
+  (effectively `'static`) — a per-step borrow cannot cross that boundary. The record's
+  effective lifetime is *longer* than the step, not shorter.
+- **`Arc<[DomainAction]>`** (shared ownership, refcount-bump instead of deep copy) is
+  possible but over-engineering here: each step emits **0–3** actions, so an owned
+  `Vec<DomainAction>` clone is a tiny alloc + a few enum copies — negligible.
+- **Option A**: the record owns a `Vec<DomainAction>` that is an owned, **filtered**
+  clone of `StepResult.actions`.
+
+Content rules:
+- `StepResult.actions` stays the **unfiltered execution feed** (the actor needs
+  `EnterMode(_)` to set its mode).
+- `RawTransitionRecord.actions` is the **ledger projection**: full `DomainAction`
+  (lossless; it already derives `Clone/Debug/PartialEq`) **minus `EnterMode(_)`** (a
+  runtime control hint, not a domain intent).
+- Semantics: these are **intended/emitted** actions from the pure step (deterministic),
+  **not** execution outcomes. Ack/timeout/failure remain separate facts (diagnostics +
+  future feedback events).
+
+Files:
+- `fsm/step.rs` — add `pub actions: Vec<DomainAction>` to `RawTransitionRecord`; build the
+  filtered clone at `StepResult` construction. Add a clear comment block stating the
+  decision (owned filtered clone; reference/`Arc` rejected; EnterMode excluded; intended
+  not outcome) and pointing here.
+- tests — extend `test/actor_contract.rs` (and/or a step-level test) to assert the
+  recorded actions for a known transition; fix any literal `RawTransitionRecord` /
+  `StepResult` constructors or exhaustive destructures broken by the new field.
+- `README.md` — short note in the observability/known-behaviors area: the transition
+  record carries the intended domain actions (EnterMode excluded; intent, not outcome).
+
+Acceptance: workspace builds; `cargo test -p common` green; new assertion proves actions
+are recorded and `EnterMode` is absent.
 
 ### WI-7b scope (DONE, agreed a1)
 
