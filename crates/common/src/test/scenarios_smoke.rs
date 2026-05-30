@@ -48,7 +48,7 @@ async fn scenario_cold_start_get_status_shows_off() {
     };
 
     let car = get_snapshot(&actor, DEFAULT_ACTOR_TIMEOUT).await;
-    assert_eq!(car.current_state, FsmState::Off);
+    assert_eq!(*car.current_state(), FsmState::Off);
 }
 
 #[tokio::test]
@@ -69,7 +69,7 @@ async fn scenario_power_on_then_drive_rpm_enters_driving() {
         .unwrap();
 
     let car = get_snapshot(&actor, DEFAULT_ACTOR_TIMEOUT).await;
-    assert_eq!(car.current_state, FsmState::Driving);
+    assert_eq!(*car.current_state(), FsmState::Driving);
     car.verify_all_invariants().expect("Safety breach on warmup");
 }
 
@@ -88,8 +88,8 @@ async fn scenario_rpm_input_ignored_when_ignition_off() {
         .unwrap();
 
     let car = get_snapshot(&actor, DEFAULT_ACTOR_TIMEOUT).await;
-    assert_eq!(car.current_state, FsmState::Off);
-    assert_eq!(car.context.powertrain.wheel_rpm.front_left, 3000);
+    assert_eq!(*car.current_state(), FsmState::Off);
+    assert_eq!(car.context().powertrain.wheel_rpm.front_left, 3000);
     car.verify_all_invariants()
         .expect("Safety breach on invalid input");
 }
@@ -116,7 +116,7 @@ async fn scenario_redline_rpm_from_driving_enters_warning() {
 
     let car = get_snapshot(&actor, DEFAULT_ACTOR_TIMEOUT).await;
     assert!(matches!(
-        car.current_state,
+        car.current_state(),
         FsmState::ExtremeOperationWarning(_)
     ));
 }
@@ -146,7 +146,7 @@ async fn scenario_get_status_after_power_on_reports_idle() {
         .expect("Actor failed to respond or timed out during GetStatus request");
 
     assert_eq!(
-        twin_snapshot.current_state,
+        *twin_snapshot.current_state(),
         FsmState::Idle,
         "Car should be in Idle state after PowerOn"
     );

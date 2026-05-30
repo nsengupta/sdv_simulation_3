@@ -379,11 +379,11 @@ work-item = one focused commit, subject prefixed with the ID (e.g.
 | ID | Title | Questions | Status | Depends on |
 |----|-------|-----------|--------|------------|
 | WI-1 | Record emitted actions in `RawTransitionRecord` | Q4, Q5, Q9 | **DONE** | WI-7a |
-| WI-2 | Public pure state-law checker + journey fold | Q6 | pending | — |
+| WI-2 | Public pure state-law checker + journey fold | Q6 | **DONE** | WI-1 |
 | WI-3 | `Clock` seam in runtime options | Q7, Q8 | pending | — |
 | WI-4 | `as_of_seq` snapshot stamp + Counter-A session/epoch | Q3, Q7 | pending | WI-7b |
-| WI-5 | Reclassify `LogWarning` toward diagnostic sink | Q5 | pending | — |
-| WI-6 | Test helper `(controller, actuation_rx)` + ack-injection | Q2 | pending | — |
+| WI-5 | Reclassify `LogWarning` toward diagnostic sink | Q5 | **DONE** | — |
+| WI-6 | Test helper `(controller, actuation_rx)` + ack-injection | Q2 | **DONE** | — |
 | WI-7a | Type renames `TransitionRecord`→`RawTransitionRecord`, old `RawTransitionRecord`→`PublishedTransitionRecord` | Q4, Q7 | **DONE (uncommitted)** | — |
 | WI-7b | Field rename `PublishedTransitionRecord.sequence_no`→`record_seq` (a1: leave `CorrelationId` as-is) | Q4, Q7 | **DONE** | WI-7a |
 | WI-8 | Single-writer ledger actor owns `record_seq` | Q7 | actorification | WI-7b |
@@ -433,6 +433,122 @@ Files:
 Acceptance: workspace builds; `cargo test -p common` green; new assertion proves actions
 are recorded and `EnterMode` is absent.
 
+### WI-2 scope (DONE — final shape)
+
+Expose the state laws as a **pure, public primitive** and keep `verify_all_invariants` a thin
+wrapper (resolves Q6). **No journey-fold helper ships in the library** — that consumer-side
+concern lives *outside* the twin (external verifier / offline tool / future observer actor),
+folding the primitive itself. See ADR-1 (superseded) and ADR-2/-3 for the reasoning.
+
+Decision trail (the "why"):
+- **Catalog over ad-hoc calls.** The two laws were `pub(super)` free functions invoked
+  inline by `verify_all_invariants`. They are now gathered into a named catalog
+  `STATE_LAWS: &[StateLaw { name, check }]` so a failure can be reported as *which* named
+  law failed — not just a string. `verify_state_laws(&FsmState, &VehicleContext)` runs the
+  whole catalog and **collects all** violations (`Result<(), Vec<LawViolation>>`), rather
+  than short-circuiting on the first, so a single cut can surface every breach at once.
+- **`verify_all_invariants` is now a thin wrapper:** identity + health (snapshot-only
+  concerns) then delegate to `verify_state_laws`. The state-law subset is exactly what an
+  external verifier folds over a journey (identity is constant; health rides in ctx).
+- **No library journey checker (reversed mid-design).** An earlier iteration shipped a
+  first-class `verify_journey_state_laws` (over `(record_seq, &RawTransitionRecord)`, tagging
+  `JourneyCut::{Entry,Exit}`, checking `s0` + every exit). It was **dropped**: the verifier is
+  a *consumer* of the published stream, expected to be written by a non-core dev / offline CLI
+  reading a captured file, using the twin's public types + `verify_state_laws`. Baking the
+  fold into the library was over-engineering (ADR-1 superseded). The pure laws are an
+  **oracle** (tests / CI / offline / async-sampled), never a PROD hot-path gate.
+- **Cut semantics (retained as guidance for the external verifier, ADR-2).** A *cut* is one
+  `(state, ctx)` snapshot; each record spans an **entry** `(old_state, old_ctx)` and **exit**
+  `(next_state, current_ctx)`. A verifier folds `verify_state_laws` over each cut and should
+  **verify** the starting cut `s0` rather than assume it (totality over partial / replayed /
+  windowed streams). The laws are **node** invariants, not **edge**/transition-legality.
+- **Intent assertions ride along (the WI-1 payoff).** Because records carry
+  `transition.actions`, a verifier asserts on emitted intents (e.g. "the redline cut emitted
+  `StartBuzzer`") alongside the state-law fold. `ExtremeOperationWarning(Instant)`
+  non-determinism does not affect cut-checking (laws read only ctx).
+
+Files (final):
+- `digital_twin/car_behaviour_checker.rs` — `StateLaw`, `STATE_LAWS`, `LawViolation`,
+  `verify_state_laws`. Laws kept private; reached only through the catalog.
+- `digital_twin/mod.rs` — `verify_all_invariants` thin wrapper; re-exports the state-law API.
+- `lib.rs` — crate-level re-exports of `verify_state_laws` + catalog types.
+- `test/fsm_step_contract.rs` — two tests showing the *external-verifier pattern*: fold
+  `verify_state_laws` over a legal journey's cuts (+ assert recorded `StartBuzzer` intent),
+  and flag an illegal `Driving`-sub-stall-RPM cut by law name.
+
+Acceptance met: workspace builds; `cargo test -p common` green (74 tests); `verify_state_laws`
++ catalog are the public primitives, no journey helper in the lib.
+
+### WI-5 scope (DONE — least-ripple routing change)
+
+Reclassify `DomainAction::LogWarning` as observability: the actor routes it to the
+**diagnostic sink** instead of the actuation manager's no-op (resolves Q5; the runtime
+embodiment of ADR-3's "enforce in transition, **announce via diagnostics**").
+
+Decision trail (the "why"):
+- **Re-route at the actor, don't restructure the pure layer.** `LogWarning` stays a
+  `DomainAction`, still emitted by the pure step (`step` for `RejectedPowerOff`, `output` for
+  speed/extreme messages, **and** the front-headlamp assembly for in-flight request warnings —
+  more producers than Q5 first noted). It stays in `StepResult.actions` *and* in the
+  `RawTransitionRecord.actions` ledger (per Q5: the record entry is expected and useful for
+  replay). Only the **routing** changes — the single chokepoint is the actor's action loop.
+  This is why WI-5 is the lowest-ripple do-now item.
+- **Rejected (bigger ripple):** removing `LogWarning` from `DomainAction` and surfacing
+  warnings through a separate `StepResult` field / diagnostic-intent type. That would touch the
+  pure step shape, the transition record, and ~20 test assertions across
+  `fsm_step_contract`/`lighting_step_contract`/`fsm_engine_contract`/`op_strategy_contract`.
+  Deferred indefinitely; not needed to achieve the reclassification.
+- **Actuation manager keeps a no-op `LogWarning` arm** purely for `DomainAction` match
+  exhaustiveness; it is now unreachable in practice (commented as such).
+
+Files:
+- `diagnostic/mod.rs` — new `diag_warning(identity, message)` helper (Warning level).
+- `lib.rs` — export `diag_warning`.
+- `engine/controller/virtual_car_actor.rs` — new `DomainAction::LogWarning(message)` arm in the
+  action loop → `diagnostic_sink.try_emit(diag_warning(..))`; no longer falls through to
+  `actuation_manager.execute`.
+- `engine/controller/actuation_manager.rs` — `LogWarning` arm re-commented as dead/no-op.
+- `test/actor_contract.rs` — `scenario_log_warning_is_routed_to_diagnostic_sink`: redline
+  transition surfaces the speed-threshold warning as a Warning-level diagnostic.
+
+Acceptance met: workspace builds; `cargo test --workspace` green (`common` 76); the
+speed/extreme/headlamp warnings now appear on the diagnostic stream, not the actuation path.
+
+### WI-6 scope (DONE — actuation round-trip test ergonomics)
+
+Test-only helpers that make the full actuation loop a one-liner:
+**send command → observe command → inject ack/nack → observe resulting transition** (resolves Q2).
+The harness plays the role of the *future* actuation child actor — it owns the `rx` end of the
+injected `actuation_command_tx`, asserts the outbound command, then feeds the matching ack/nack
+back through the **real physical-ingress path**.
+
+Decision trail (the "why"):
+- **Location: `#[cfg(test)]` in `common/src/test/mod.rs`.** Zero production / public-API
+  ripple — the helpers live beside `ActorGuard` and are compiled only under `cfg(test)`.
+- **No new types; reuse `ActorGuard`.** `install_with_actuation` returns a
+  `(VehicleController, mpsc::Receiver<ActuationCommand>, ActorGuard<…>)` tuple. An earlier
+  `ActuationRig` struct was **rejected as noise** — the tuple + existing guard carry everything.
+- **Ack path = real physical ingress.** Injection goes through
+  `submit_physical_car_event(FrontHeadlampCommandConfirmed/Rejected)`, mapping
+  `On → on_command:true`, `Off → false`. This exercises the projection seam and mirrors the
+  existing gateway e2e rather than poking the FSM directly.
+- **Determinism.** Helpers return the command verbatim; tests assert on the **variant** and
+  `sequence_no` monotonicity, never on `session_id` (wall-clock-derived). Ack injection needs no
+  `correlation_id`.
+- **Tidy-up folded in:** the blanket `#[allow(dead_code)]` + stale "not wired yet" comment on
+  `ActorGuard` were removed; the doc comment now explains the RAII contract, and the unread
+  `handle` field carries a **scoped** `#[allow(dead_code)]` with an accurate "held for ownership"
+  rationale.
+
+Files:
+- `test/mod.rs` — `install_with_actuation`, `expect_actuation_command` (panics on
+  timeout/close), `inject_matching_ack`, `inject_matching_nack`; `ActorGuard` doc/lint tidy-up.
+- `test/actor_contract.rs` — `scenario_actuation_ack_round_trip_via_helper` (observe
+  `SwitchFrontHeadlampOn` → inject ack → `headlamp.state == On`) and
+  `scenario_actuation_nack_round_trip_via_helper` (… → inject nack → `state == Off`).
+
+Acceptance met: `cargo test -p common --lib` green (78); no new clippy warnings.
+
 ### WI-7b scope (DONE, agreed a1)
 
 Renamed **only** the ledger field; `CorrelationId` and all `vehicle_device_bus`
@@ -474,10 +590,11 @@ Cheap & high-value **now** (independent of the actor split, and they make the sp
    transition: RawTransitionRecord }` published to the sink.
 
    **Still to finalize (TODO 7):**
-   - [ ] Field: `PublishedTransitionRecord.sequence_no` → **`record_seq`** (`ledger_seq`),
-     leaving `CorrelationId` as the command axis (`command_seq`).
+   - [x] Field: `PublishedTransitionRecord.sequence_no` → **`record_seq`** (`ledger_seq`),
+     leaving `CorrelationId` as the command axis (`command_seq`). **DONE in WI-7b.**
    - [ ] Give Counter A a **session/epoch** (mirrors `CorrelationId.session_id`) so
      restarts don't reuse `record_seq` ambiguously (ties to `as_of_seq`, Q3).
+     **Deferred to WI-4 (pending).**
 
 Better done **with actorification** (shape becomes clear once children exist):
 
@@ -492,3 +609,273 @@ Better done **with actorification** (shape becomes clear once children exist):
 11. **Move connector I/O for buzzer/egress into the actuation child actor** (the existing
     `TODO(actuation-child-actor)` / `TODO(actuation-egress)` arms), now backed by the
     recorded-action ledger so behavior stays observable through the transition.
+
+---
+
+## Knowledge capture — status + rationale digest (source for README & blog)
+
+Compact, single-glance digest pulled from the Q&A and work-item scopes above. This is the
+**authoritative status + "why"** to draw from when writing (a) a tight README section and
+(b) the technical blog. Keep it current as work-items land.
+
+### Status board
+
+| WI | What | Status | One-line "why it matters" |
+|----|------|--------|---------------------------|
+| WI-7a | `TransitionRecord`→`RawTransitionRecord`, old `RawTransitionRecord`→`PublishedTransitionRecord` | **DONE** | Names must distinguish the raw pure-step fact from the published-to-sink wrapper *before* actions + correlation share a record. |
+| WI-7b | Ledger field `sequence_no`→`record_seq` | **DONE** | Disambiguate the **ledger** counter (Counter A) from the **command** counter (`CorrelationId`, Counter B) — naming is the contract. |
+| WI-1 | Record emitted actions in `RawTransitionRecord` | **DONE** | The ledger now shows *what the FSM decided to do* (intended intents), making no-op actions observable and feeding journey/causality work. |
+| WI-2 | Public pure state-law primitive (`verify_state_laws` + catalog) | **DONE** | Invariants are a pure, named-law *oracle*; an external/offline verifier folds it over a captured stream. No journey helper in the lib (dropped as over-engineering). |
+| WI-3 | `Clock` seam in runtime options | pending | Make the lone `Instant::now()` injectable → deterministic ACK-timeout / 5 s-cooldown tests without `sleep`. |
+| WI-4 | `as_of_seq` snapshot stamp + Counter-A session/epoch | pending | Make snapshot staleness explicit & reconcilable; stop `record_seq` reuse across restarts. |
+| WI-5 | Reclassify `LogWarning` toward the diagnostic sink | **DONE** | `LogWarning` is observability, not actuation — the actor now routes it to the diagnostic bus instead of the actuation no-op. |
+| WI-6 | Test helper `(controller, actuation_rx)` + ack-injection | **DONE** | `#[cfg(test)]` helpers in `test/mod.rs` reusing `ActorGuard`; ack/nack injected via the real `submit_physical_car_event` ingress path. |
+| WI-8..11 | Ledger actor / correlation DAG / diagnostics-as-projection / actuation child I/O | actorification | Shapes that only crystallize once the monolithic actor splits into parent + child actors. |
+
+### Decisions worth keeping (the "why", distilled)
+
+1. **Two channels, not peers.** `transition_tx` = authoritative *fact ledger* (lossless,
+   totally ordered by `record_seq`, one record per event). `diagnostic_tx` = best-effort
+   *multi-source telemetry bus* (unbounded, unordered, many producers). You cannot
+   reconstruct one from the other; actorification *strengthens* the two-channel split.
+2. **`GetStatus` is as-of, never wrong.** A snapshot reflects events ≤ its sequence; the
+   fix is to make staleness *legible* (`as_of_seq`, WI-4), not to add a mutating refresh.
+   Prefer the ledger over polling for verification.
+3. **Record intended actions, not outcomes.** The pure step is deterministic, so the record
+   captures *emitted intents*; ACK/timeout/nack/failure are *separate* facts (diagnostics +
+   feedback events that generate their own records). `EnterMode` is excluded from the record
+   (runtime control hint, not a domain intent).
+4. **Two `sequence_no` counters exist and must never be confused.** Counter A (ledger,
+   `record_seq`, per `car_identity`, every event) vs Counter B (`CorrelationId`, per
+   `(source_id, session_id)`, only on a correlated command, leaves the process narrowed to
+   `u32` on CAN). No aliasing today; naming keeps them apart.
+5. **Pure core, injected edges.** `step(state, ctx, event, now)` never reads a clock — time
+   is an input. The only non-determinism is the actor's `Instant::now()`; a `Clock` seam
+   (WI-3) makes it deterministic without touching the functional core.
+6. **A journey is a trajectory of cuts; verification lives outside the twin.** Laws hold at
+   every `(state, ctx)` cut. The library ships only the pure primitive `verify_state_laws`
+   (named-law catalog, collects all violations); an *external/offline verifier* folds it over
+   a captured `PublishedTransitionRecord` stream, verifying `s0` rather than assuming it.
+   Laws are **node** invariants, not edge/transition-legality. Invariants are *enforced* in
+   the FSM transition and *announced* via diagnostics — the oracle never gates the hot path.
+7. **Child actors never mutate parent state.** The parent's pure `step` stays the sole state
+   mutator; children only feed results back as new events (async self-messages are fine;
+   synchronous in-handler re-entrancy is not). This rule survives actorification.
+
+### Open TODOs (carried forward)
+
+- **WI-3:** add `trait Clock { fn now(&self) -> Instant; }`, inject via
+  `VehicleControllerRuntimeOptions` (default = real monotonic; tests = advanceable fake);
+  replace the actor's `Instant::now()`. Unblocks deterministic timeout/cooldown tests.
+- **WI-4:** add `as_of_seq: u64` to the snapshot reply; give Counter A a session/epoch so
+  restarts don't reuse `record_seq`.
+- **WI-5:** **DONE** — the actor routes `DomainAction::LogWarning` to the diagnostic sink
+  (see WI-5 scope).
+- **WI-6:** **DONE** — `#[cfg(test)]` helpers return `(controller, actuation_rx, guard)` plus
+  one-liner ack/nack injectors that round-trip through the real physical-ingress path
+  (see WI-6 scope).
+- **Actorification (WI-8..11):** single-writer ledger actor owns `record_seq`; correlation
+  IDs threaded action→command→feedback→record (causal DAG); state-transition diagnostics
+  become a projection of the ledger; buzzer/egress I/O moves into the actuation child actor.
+
+---
+
+## ADR log (in-flight technical decisions)
+
+Conscious choices captured as they are debated, so the README/blog can cite the *why*, not
+just the *what*. Status: `ACCEPTED` (decided) / `OPEN` (recommendation pending confirmation).
+
+### ADR-1 — Journey checker input type & placement (Q1/Q6) — `SUPERSEDED`
+
+**Superseded by ADR-3 (verifier lives outside the lib).** The whole "where does the journey
+checker live / what record type does it take" question dissolved once we decided the verifier
+is a *consumer* of the published stream, written outside the twin. No `ledger_audit` module;
+no library journey-fold; `verify_journey_state_laws`/`JourneyCut`/`JourneyViolation` were
+dropped. The analysis below is retained for the blog ("a path we explored and rejected").
+
+<details, retained for history>
+
+
+**Context.** `verify_journey_state_laws` currently takes `(record_seq, &RawTransitionRecord)`
+pairs and lives in `digital_twin` next to the pure law catalog. The runner of a journey
+check, however, is whoever sits at the **receiving end of `transition_tx`**: today a test
+harness draining `rx`, later a dedicated observer/telemetry/journal actor (WI-10). Both hold
+`PublishedTransitionRecord`, which **already carries `record_seq`**.
+
+**Forces.**
+- `record_seq` is *intrinsically a published-ledger property* — a bare `RawTransitionRecord`
+  (pure-step fact) has no sequence number; it is assigned at publication. So "verify a
+  journey *and report ledger positions*" conceptually operates on `PublishedTransitionRecord`.
+- The tuple signature forces every caller to write `.map(|p| (p.record_seq, &p.transition))`
+  and to *re-supply* a seq the published record already owns.
+- Layering: `digital_twin` is the pure safety-law layer (`verify_state_laws` over
+  `FsmState`+`VehicleContext`). Making it import `transition_sink` (the observability
+  transport type) is a layering smell — though **not** a cycle (`transition_sink → fsm`
+  only; `transition_sink` does not import `digital_twin`).
+
+**Recommendation (pending placement nod).**
+- Keep `verify_state_laws(&FsmState, &VehicleContext)` — the pure catalog — in `digital_twin`.
+- Move `verify_journey_state_laws` to take `&PublishedTransitionRecord` and live at the
+  **ledger-consumer layer** (inside `transition_sink`, or a small new `ledger_audit`/`journey`
+  module that may depend on both). It calls *into* `digital_twin::verify_state_laws`.
+- Resulting dependency arrow: **ledger-consumer → law-catalog** (correct direction); drops the
+  tuple gymnastics; uses the existing `record_seq`. Function stays first-class/PROD-usable.
+- Rejected alternative: keep the `Raw`+tuple API for "full decoupling." Its only benefit is
+  letting pure step-level tests build records without publishing — but those tests already
+  build `PublishedTransitionRecord` and strip it to a tuple, so the benefit is illusory.
+- **Open:** placement — `transition_sink` vs a new `ledger_audit` module.
+
+**Evidence from the tree (for the placement sub-decision).**
+- The live consumer already exists and holds `PublishedTransitionRecord`: the gateway's
+  `transition_tx` end is a `tokio::spawn` drain loop (`while let Some(record) = rx.recv()`)
+  that reads `record.record_seq` directly. This is the prototype of the WI-10
+  observer/telemetry actor and confirms the `Published` signature is the ergonomic one.
+- Precedent: the `diagnostic` module bundles *streamed type + sink + consumer*
+  (`DiagnosticMessage` + sink + `spawn_stdout_diagnostic_observer`). So "consumer-side helper
+  next to the streamed type" is an accepted pattern — *but* `diagnostic`'s observer needs
+  nothing external, whereas the journey auditor needs `digital_twin::verify_state_laws`.
+
+**Cycle check (both legal).** `digital_twin` deliberately does **not** import `transition_sink`
+(no back-edge), so:
+- Option A (auditor in `transition_sink`) ⇒ `transition_sink → digital_twin → fsm` + the
+  existing `transition_sink → fsm`. Acyclic, but the pure transport/sink module would start
+  depending on the safety-law model (against its "ship it, don't inspect it" identity).
+- Option B (new `ledger_audit`) ⇒ `ledger_audit → {transition_sink, digital_twin} → fsm`.
+  Acyclic; both leaves stay lean; the bridge concern (audit a shipped ledger against the laws)
+  gets its own home — exactly where the WI-10 observer/auditor and a future **edge-law**
+  checker (see ADR-2) will accrete.
+
+**Sharpened recommendation: Option B (new `ledger_audit` module), `Published` signature.**
+The auditor is a cross-cutting *consumer* concern bridging two leaf modules and is expected to
+grow (observer actor, alert-on-breach, edge-laws). The `diagnostic` precedent favors
+streaming-helpers-next-to-type, but auditing-against-laws is a *bridge*, not streaming, so it
+should not burden the transport module. Counter-argument (acknowledged): today it is a single
+function, so a dedicated module is slightly ahead of need — acceptable only because WI-10 /
+edge-laws are already anticipated. Name: `ledger_audit` preferred over `journey` (which
+collides with the fold vocabulary).
+</details>
+
+### ADR-2 — The external verifier audits *nodes* (cuts), and *verifies* `s0` rather than *assumes* it (Q2/Q6) — `ACCEPTED` (re-scoped to the external/offline verifier)
+
+**Scope note:** this is guidance for the **external/offline verifier** (the library no longer
+ships a journey-fold; see ADR-1 superseded). It applies to whatever folds `verify_state_laws`
+over a captured stream.
+
+**Distinction.** The inductive *correctness proof* of an FSM is "base case `s0` legal + every
+transition preserves legality ⇒ all states legal." The verifier is **not** proving the
+machine correct — it is **auditing observed data**. A pure function handed a `Vec` of records
+cannot know the provenance (cold boot vs replay vs windowed slice vs fuzz vs buggy build), so
+it **verifies** the base case rather than **assuming** it. `s0` is present in
+`records[0].old_state/old_ctx`; checking it directly is one extra evaluation and is strictly
+stronger than trusting it. An invariant guardian that trusts its input is not guarding.
+
+**Node-laws, not edge-laws.** The current laws are predicates over a *single* `(state, ctx)`
+cut ("is this state internally consistent", e.g. not Off-while-moving). They say nothing about
+whether `s0 --event--> s1` was a *permitted transition*. Edge/transition-legality would be a
+separate checker over `(old_state, event, next_state)` — noted as a **future law category**,
+not done. Hence there is no "reach `s0` first, then validate the edge" ordering here; every
+cut is validated independently as a node.
+
+**Cost/benefit of checking `s0`.** For a genuine complete-from-boot journey, `s0 = (Off,
+default ctx)` is legal by construction, so the entry check never fires → cheap redundancy,
+**zero false positives**. It earns its keep only when `s0` is *not* the cold-boot state:
+- a **windowed/partial ledger** — a live observer may never see record 1 (bounded channel,
+  late subscription), so its first-seen `s0` is a mid-trajectory state (direct tie to ADR-1);
+- a **replayed/persisted/networked** log, or a hand-built/fuzzed record;
+- a real **`step` bug** emitting an illegal state.
+
+**Guidance for the verifier.** Fold over the **entry cut of the first record (`s0`) + the exit
+cut of every record** (`s1..sn`), each distinct trajectory state once; report failures with the
+`record_seq` and which endpoint. Entry cuts of non-first records need not be re-checked (they
+equal the prior exit on a contiguous stream). A synthetic `(Off, speed=42)` starting record —
+not something the live FSM emits — demonstrates this is **total/self-contained** over arbitrary
+record sets, *not* an FSM bug.
+
+**Alternative (not recommended):** "audit forward progress only, trust the start" (check exits
+only). It silently breaks for windowed/replayed streams (a live observer may never see record
+1), so a verifier should prefer checking `s0`.
+
+### ADR-3 — Invariants are *enforced* in the transition, *announced* via diagnostics, *detected* offline — never an inline PROD gate (Q3) — `ACCEPTED`
+
+**Decision.** Three distinct roles, never collapsed into "call a big checker on every state
+change":
+1. **Enforce (primary guardian)** in the FSM transition — clamp or reject so the twin stays in
+   a steady, predictable state even when an input would violate a property. The transition is
+   *strict*; illegal states are minimized by construction. Already exemplified by
+   `freeze_standstill()` (speed clamped to 0 while `Off`).
+2. **Announce** a would-be / clamped violation as a **diagnostic** (not actuation). This is
+   exactly **WI-5** (reclassify `LogWarning` toward the diagnostic sink): Point 3 and WI-5 are
+   the same insight. The pure `step` cannot emit diagnostics directly, so it emits a
+   diagnostic-*intent* the actor routes to `diagnostic_tx`.
+3. **Detect (oracle)** post-hoc with the pure `verify_state_laws`, folded by the external
+   verifier over the recorded stream — tests / CI / offline / async-sampled. **Never** on the
+   PROD hot path, **never** a synchronous gate.
+
+**Why not an inline checker (the cost reasoning).**
+- *PROD compute:* the oracle is off the hot path → zero PROD cost regardless of how large the
+  law catalog grows.
+- *Testing:* the oracle is pure and actor-free → replay a captured/synthetic
+  `Vec<PublishedTransitionRecord>` and fold; cheap, parallel, decoupled from runtime timing.
+  An inline gate would inflate every integration test and couple correctness to scheduling.
+- *Actorification:* "are all parameters correct *right now*" stops being answerable by any one
+  actor (state is spread across actors + in-flight messages). A synchronous global check would
+  need a **distributed barrier** (freeze all actors, snapshot) — expensive and it kills the
+  concurrency actorification buys. So: **local invariants** stay enforced per-actor in
+  transitions; **global/cross-actor invariants** are reconstructed *offline* from the merged
+  ledger via `record_seq` + `correlation_id`. This is why `as_of_seq` (Q3/WI-4) exists.
+
+**Prototype scope (explicit, agreed).**
+- The set of *safety clamps* (which dangerous states to forbid, how to clamp) depends on deep
+  Automotive/Physics domain knowledge. This prototype does **not** aim for PROD-grade clamp
+  coverage; it aims to **demonstrate that the FSM never lets the vehicle reach a dangerous
+  state**, with violations surfaced via diagnostics.
+- For capturing the transition stream cheaply, prefer a **memory-mapped file** sink (no
+  network cost/latency) that an offline verifier reads — over a networked collector. (Candidate
+  for the "dumb writer on `rx`" consumer; not yet built.)
+
+**Open for actorification (carry forward).** *Where and how the global view of the
+`DigitalTwinCar` is held* once state is split across a parent FSM actor + child actors is an
+unresolved design question. Options to weigh later: a single-writer ledger/journal actor as the
+authoritative merge point (ties to WI-8), a periodically-materialized parent snapshot stamped
+with `as_of_seq`, or purely offline reconstruction from the ledger. Decide with the actor split,
+not before.
+
+### ADR-4 — `DigitalTwinCar` is correct-by-construction; FSM step is the sole mutator (enforce, don't validate) — `ACCEPTED`
+
+**Context.** `verify_all_invariants` opened with a runtime check `if self.identity.is_empty()`.
+That guarded a hole the *type* allowed: `identity: String` (public) could be empty, and any code
+could set `current_state`/`context` to arbitrary values. The goal: make "a `DigitalTwinCar`
+without valid constituents" *unrepresentable* rather than runtime-checked (ADR-3 #1 in the
+small: enforce by construction).
+
+**Decisions (chosen interactively).**
+- **Mechanism:** private fields + a checked constructor (not a `CarIdentity` newtype). Keeps
+  `identity: String` but routes all construction through `DigitalTwinCar::new`.
+- **Constructor:** `new(identity, current_state, context) -> Result<Self, DigitalTwinCarError>`
+  validates the only structurally-invalid constituent — a **blank identity** (empty or
+  **whitespace-only**, rejected; stored **trimmed**). `current_state`/`context` are
+  caller-supplied (a freshly-born twin passes `Off` + `VehicleContext::default()`).
+- **Boundary:** validation happens where the twin is born — the actor's `pre_start` — and a
+  blank identity **fails actor startup** (`DigitalTwinCarError` → `ActorProcessingErr` via `?`).
+  Public `install_and_start*` signatures are unchanged.
+- **Mutation:** fields are private, so the actor's old `twin.current_state = …; twin.context =
+  …` becomes a single `apply_step(next_state, context)` method. This **structurally enforces
+  Q9**: external code cannot mutate the twin except by recording a pure-step result, so the FSM
+  `step` is provably the sole state mutator. Reads go through `identity()` / `current_state()` /
+  `context()` accessors.
+- **`verify_all_invariants`:** the identity check is **deleted** (now dead — non-blank is
+  guaranteed by the type). `is_healthy()` stays a runtime check because health is *time-varying*
+  (a sensor property), not a construction invariant.
+
+**Scope (explicitly bounded).**
+- Only the identity hole is closed structurally. **`VehicleContext` internal coherence**
+  (e.g. speed derived from rpm) is **deferred** — a separate newtype effort, out of scope here.
+- **State restore** (rehydrating a twin at a non-`Off` state after replay/restart) is **not**
+  added now; a validated `from_snapshot`/`rehydrate` constructor comes later (ties to WI-4).
+- *Safety clamps* (which dangerous states to forbid + how to clamp) need deep Automotive/Physics
+  domain knowledge; this prototype only **demonstrates** the FSM never reaches a dangerous
+  state, not PROD-grade clamp coverage (carried from ADR-3 prototype scope).
+
+**Result.** "Twin with a blank identity" and "twin mutated outside the FSM step" are now
+unrepresentable. `cargo test --workspace` green; the change rippled only into accessor/`apply_step`
+call sites (actor + tests), no public controller-signature change.

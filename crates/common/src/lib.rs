@@ -15,7 +15,10 @@ mod virtual_car_actor;
 #[cfg(test)]
 mod test;
 
-pub use digital_twin::{DigitalTwinCar, DigitalTwinCarVocabulary, NotFsmVocabulary};
+pub use digital_twin::{
+    verify_state_laws, DigitalTwinCar, DigitalTwinCarError, DigitalTwinCarVocabulary, LawViolation,
+    NotFsmVocabulary, StateLaw, STATE_LAWS,
+};
 pub use domain_types::{PhysicalCarVocabulary, VehicleEvent, VehicleState};
 pub use engine::connectors::{PhysicalToDigitalProjector, Projector, ProjectionError};
 pub use engine::context::VehicleControllerContext;
@@ -43,6 +46,6 @@ pub use transition_sink::{
 pub use diagnostic::{
     DiagnosticLevel, DiagnosticMessage, DiagnosticSink, DiagnosticSinkError,
     TokioMpscDiagnosticSink, diag_state_transition, diag_timer_tick,
-    diag_actuation_failure, diag_transition_sink_full, diag_transition_sink_closed,
+    diag_actuation_failure, diag_warning, diag_transition_sink_full, diag_transition_sink_closed,
     spawn_stdout_diagnostic_observer,
 };

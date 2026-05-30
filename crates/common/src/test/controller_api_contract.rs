@@ -34,7 +34,7 @@ async fn given_physical_car_event_when_submitted_then_controller_drives_actor_st
         .get_snapshot(Some(Duration::from_millis(250)))
         .await
         .expect("snapshot should be returned");
-    assert_eq!(snapshot.current_state, FsmState::Driving);
+    assert_eq!(*snapshot.current_state(), FsmState::Driving);
 }
 
 #[tokio::test]
@@ -66,8 +66,8 @@ async fn given_controller_when_get_snapshot_called_then_returns_readonly_snapsho
         .await
         .expect("controller snapshot should reply");
 
-    assert_eq!(direct.current_state, via_api.current_state);
-    assert_eq!(direct.context, via_api.context);
+    assert_eq!(direct.current_state(), via_api.current_state());
+    assert_eq!(direct.context(), via_api.context());
 }
 
 #[tokio::test]
@@ -88,5 +88,5 @@ async fn given_power_on_then_power_off_facade_when_idle_then_state_is_off() {
         .get_snapshot(Some(Duration::from_millis(250)))
         .await
         .expect("snapshot");
-    assert_eq!(snapshot.current_state, FsmState::Off);
+    assert_eq!(*snapshot.current_state(), FsmState::Off);
 }

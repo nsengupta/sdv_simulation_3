@@ -128,6 +128,14 @@ pub fn diag_actuation_failure(identity: &str, action: &str, err: &str) -> Diagno
     DiagnosticMessage::error("VirtualCarActor", format!("[{identity}]: actuation failure for {action}: {err}"))
 }
 
+/// Warning surfaced from a `DomainAction::LogWarning` intent emitted by the pure step.
+///
+/// `LogWarning` is observability, not actuation (WI-5 / Q5), so the actor routes it here to the
+/// diagnostic sink rather than through the actuation path.
+pub fn diag_warning(identity: &str, message: &str) -> DiagnosticMessage {
+    DiagnosticMessage::warning("VirtualCarActor", format!("[{identity}]: {message}"))
+}
+
 pub fn diag_transition_sink_full(identity: &str) -> DiagnosticMessage {
     DiagnosticMessage::warning("VirtualCarActor", format!("[{identity}]: dropping transition record: sink full"))
 }

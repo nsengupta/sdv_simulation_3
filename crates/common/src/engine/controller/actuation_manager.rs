@@ -94,8 +94,9 @@ impl ActuationManager for DefaultActuationManager {
                 // (CAN/Zenoh/uProtocol) instead of default stdout logging.
             }
             DomainAction::LogWarning(_msg) => {
-                // TODO(actuation-observability): route structured warnings to an
-                // injected logging/event sink.
+                // No-op: LogWarning is observability, not actuation. The actor routes it to
+                // the diagnostic sink (WI-5 / Q5), so it never reaches here in practice; this
+                // arm exists only for `DomainAction` match exhaustiveness.
             }
             DomainAction::RequestFrontHeadlampOn => {
                 // TODO(actuation-child-actor): move actuator command execution to a
