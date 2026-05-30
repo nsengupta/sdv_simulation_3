@@ -17,8 +17,8 @@ mod virtual_car_actor;
 mod test;
 
 pub use digital_twin::{
-    verify_state_laws, DigitalTwinCar, DigitalTwinCarError, DigitalTwinCarVocabulary, LawViolation,
-    NotFsmVocabulary, StateLaw, STATE_LAWS,
+    verify_state_laws, CarSnapshot, DigitalTwinCar, DigitalTwinCarError, DigitalTwinCarVocabulary,
+    LawViolation, NotFsmVocabulary, StateLaw, STATE_LAWS,
 };
 pub use domain_types::{PhysicalCarVocabulary, VehicleEvent, VehicleState};
 pub use engine::connectors::{PhysicalToDigitalProjector, Projector, ProjectionError};

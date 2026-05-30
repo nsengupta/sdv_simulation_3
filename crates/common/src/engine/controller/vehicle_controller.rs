@@ -1,4 +1,4 @@
-use crate::digital_twin::{DigitalTwinCar, DigitalTwinCarVocabulary};
+use crate::digital_twin::{CarSnapshot, DigitalTwinCarVocabulary};
 use crate::engine::controller::actuation_contract::ActuationCommand;
 use crate::engine::connectors::{PhysicalToDigitalProjector, Projector};
 use crate::fsm::FsmEvent;
@@ -119,12 +119,14 @@ impl VehicleController {
         Ok(())
     }
 
-    /// Read-only snapshot API for external observers.
+    /// Read-only snapshot API for external observers. The returned [`CarSnapshot`] is stamped with
+    /// `as_of_seq` — the ledger sequence of the last FSM event it reflects (Q3 / WI-4) — so callers
+    /// can reason about staleness and reconcile against the transition ledger.
     pub async fn get_snapshot(
         &self,
         timeout: Option<Duration>,
-    ) -> Result<DigitalTwinCar, VehicleControllerError> {
-        let result: Result<CallResult<DigitalTwinCar>, MessagingErr<DigitalTwinCarVocabulary>> =
+    ) -> Result<CarSnapshot, VehicleControllerError> {
+        let result: Result<CallResult<CarSnapshot>, MessagingErr<DigitalTwinCarVocabulary>> =
             self.actor
                 .call(|port| DigitalTwinCarVocabulary::GetStatus(port), timeout)
                 .await;

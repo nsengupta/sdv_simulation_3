@@ -25,23 +25,58 @@ what's next" snapshot; the full ledger is further below. Rule of record: **anyth
 *actorification* moves to a fresh cloned project — do NOT do it in this repo.**
 
 ### Done & committed in this repo
-WI-1, WI-2, WI-5, WI-6, WI-7a, WI-7b, and **WI-12** (serializable published record — also
-delivered the Counter-A **session/epoch** half of WI-4 via `SessionEpoch`). Plus two
-non-WI niceties: `EMULATOR_TUNNEL_PROB` env knob and richer state-transition diagnostics
-(decision #8). Commit trail: `WI-1` → `WI-7a/b` … → `WI-2/5/6` → `WI-12` → emulator →
-diagnostics.
+WI-1, WI-2, **WI-4**, WI-5, WI-6, WI-7a, WI-7b, and **WI-12** (serializable published
+record). WI-12 delivered the Counter-A **session/epoch** half of WI-4 via `SessionEpoch`;
+the **`as_of_seq` snapshot stamp** half is now done too. Plus two non-WI niceties:
+`EMULATOR_TUNNEL_PROB` env knob and richer state-transition diagnostics (decision #8).
+Commit trail: `WI-1` → `WI-7a/b` … → `WI-2/5/6` → `WI-12` → emulator → diagnostics → `WI-4`.
 
-### ▶️ Remaining IN THIS REPO (not actorification) — exactly one
-- **WI-4 → `as_of_seq` snapshot stamp.** Stamp the `GetStatus` reply with the ledger
-  `record_seq` it reflects, so snapshot staleness is legible / reconcilable against the
-  `transition_tx` stream. Doable in the current monolithic actor (no actorification). The
-  session/epoch half of WI-4 is already DONE (WI-12 `SessionEpoch`). **This is the next task.**
+### ▶️ Remaining IN THIS REPO (not actorification) — none
+All non-actorification work items are closed. The iteration is in a position to close.
+`GetStatus` now returns a `CarSnapshot { car, as_of_seq }`; Counter A (`record_seq`) advances
+once per applied FSM event — sink or not — so `as_of_seq` is meaningful regardless of which
+sinks are wired (`0` = no event applied yet).
 
 ### Optional, also fine in this repo (non-WI, unblocked by WI-12)
 - **Ledger file writer** — a `TransitionRecordSink` that serializes `PublishedTransitionRecord`
   to a file (serde is already derived).
 - **Offline verifier/folder** — reads that file and folds `verify_state_laws` over the
   reconstructed cuts (order by `record_seq`, elapse by `at_unix`).
+
+### 🆕 Surfaced this iteration → live-run observation (2026-05-30)
+A live gateway + actuator run (with `Ctrl-S`/`Ctrl-Q` pressed on a console) exposed several items.
+The `Ctrl-S`=XOFF / `Ctrl-Q`=XON freeze was the *trigger* (a tty flow-control artifact, not a
+logic bug), but it surfaced real design gaps. Status updated as work landed:
+
+- **✅ DONE — Silent-success defect (diagnostic channel).** A clean headlamp ACK used to push no
+  `DomainAction`, so success was invisible on the always-on diagnostic stream (only NACK/timeout
+  surfaced, via `LogWarning`). Fixed with the actor-derived Approach A: the actor classifies the
+  step result's `*Requested → On/Off` settle and emits `diag_front_headlamp_confirmed` (Info level,
+  wording matches the ingress line). Pure FSM, `DomainAction`, and the serde mirror untouched
+  (success was already in the ledger via `old_ctx`→`current_ctx`; only the human channel was mute).
+  Test: `actor_contract::scenario_actuation_ack_surfaces_confirmation_on_diagnostic_sink`.
+- **✅ DONE — Hot-path logging fix.** Both the actuator loop (`front_headlamp_actuator/src/main.rs`)
+  and the gateway ingress loop (`gateway_runtime.rs::run_can_ingress_dispatch_loop`) logged
+  synchronously on the protocol-critical path, so console back-pressure became a protocol stall.
+  Now: logging is handed to a bounded side-channel drained by a separate thread (actuator,
+  `sync_channel` + `log_line`) / task (gateway, tokio `mpsc` + `try_send`); producers use
+  non-blocking `try_send`, **drop-on-full** (actuator also surfaces a dropped-count). The gateway
+  delivers the ACK to the twin *before* logging. CAN reads/writes unchanged; `common` untouched.
+- **WI-13 — Actuation resilience (bounded retry / backoff / dedup / circuit-breaker).** STILL OPEN
+  → next iteration. When the actuator is genuinely down or dropping responses, the lux-driven
+  reconcile re-requests every telemetry tick and `HeadlampContext::on_timer_tick` emits a timeout
+  warning *every* tick → unbounded identical commands + per-tick spam, no recovery. Needs:
+  max-retry + backoff, dedup of identical pending requests, an explicit `LightingState::Unknown`/
+  degraded terminal state, and a **rate-limited / once** "peer persistently unavailable"
+  diagnostic. Overlaps WI-9/WI-8 but dedup/backoff is doable standalone. Anchors:
+  `crates/common/src/fsm/assembly/front_headlamp.rs` (`evaluate_lux`, `on_timer_tick`,
+  `recover_incomplete`).
+- **OPEN DECISION — retire gateway ingress printing?** Precondition **(a) is now met** (the twin
+  emits a success diagnostic). Remaining precondition **(b)**: WI-9 must land the wire `session`+`seq`
+  correlation into the `PublishedTransitionRecord` (the ingress line's other unique contribution).
+  Once (b) lands, the gateway ingress print (`format_front_headlamp_ingress`) is fully redundant
+  with the twin's diagnostic + transition channels and should be removed (or kept only behind
+  `--trace-actuation-ingress` as a wire trace). Until then it stays (now off the hot path).
 
 ### ⛔ Deferred to the actorification CLONE (do NOT do here)
 - **WI-3** — `Clock` seam (jointly deferred; co-design with the ticker/timer child actor).
@@ -50,6 +85,19 @@ diagnostics.
 - **WI-10** — state-transition diagnostics as a projection of the ledger (lands decision #8's
   structured `SafetyClass` seam).
 - **WI-11** — move buzzer/egress I/O into an actuation child actor.
+- **WI-14 — Unified diagnostic channel across child actors (DESIGN DECISION).** Once actorification
+  splits the monolith into a parent FSM actor + dedicated child actors (front-headlamp actuator
+  child, future buzzer/egress children, telemetry/observer), **each child will emit its own
+  diagnostics**. Today there is a single `diagnostic_tx` owned by the one `VirtualCarActor`; with
+  many emitters we must decide how all diagnostics **fan in to one combined, ordered-enough stream**
+  for the operator (and the planned GUI/TUI). Design space to settle in the clone: (1) a shared
+  `Arc<dyn DiagnosticSink>` cloned into every child vs. (2) a dedicated **diagnostics aggregator
+  actor** that children message and that owns the single console/GUI drain; tagging each message
+  with its source actor + identity (the `source` field already exists); whether ordering across
+  children matters (likely best-effort, unlike the totally-ordered transition ledger); and bounded
+  vs. unbounded fan-in with drop-on-overflow. Ties to WI-10 (diagnostics-as-projection) and the
+  decision-#8 structured `SafetyClass` seam. This generalizes the per-child emission pattern; pick
+  the aggregation shape **before** wiring the first child actor's diagnostics.
 
 ---
 
@@ -416,7 +464,7 @@ work-item = one focused commit, subject prefixed with the ID (e.g.
 | WI-1 | Record emitted actions in `RawTransitionRecord` | Q4, Q5, Q9 | **DONE** | WI-7a |
 | WI-2 | Public pure state-law checker + journey fold | Q6 | **DONE** | WI-1 |
 | WI-3 | `Clock` seam in runtime options | Q7, Q8 | **deferred → actorification** (co-design with ticker actor; pure core already time-as-input) | — |
-| WI-4 | `as_of_seq` snapshot stamp + Counter-A session/epoch | Q3, Q7 | session/epoch **DONE** (via WI-12 `SessionEpoch`); `as_of_seq` snapshot stamp still pending | WI-7b |
+| WI-4 | `as_of_seq` snapshot stamp + Counter-A session/epoch | Q3, Q7 | **DONE** — session/epoch via WI-12 `SessionEpoch`; `as_of_seq` via `CarSnapshot { car, as_of_seq }` (Counter A advances per applied FSM event) | WI-7b |
 | WI-12 | Serializable published record (`Instant` inside → `Duration`-since-`UNIX_EPOCH` for the world) | Q7 | **DONE** | WI-7b |
 | WI-5 | Reclassify `LogWarning` toward diagnostic sink | Q5 | **DONE** | — |
 | WI-6 | Test helper `(controller, actuation_rx)` + ack-injection | Q2 | **DONE** | — |
@@ -637,8 +685,44 @@ Files:
 - `gateway/src/gateway_runtime.rs` — transition print uses the flat published fields.
 
 Acceptance met: `cargo test --workspace` green (78 common + gateway/bus e2e); `published.rs`
-clippy-clean. Not in this slice (deliberately): the file writer, the offline reader/verifier, and
-the `as_of_seq` snapshot stamp (the rest of WI-4).
+clippy-clean. Not in this slice (deliberately): the file writer and the offline reader/verifier.
+The `as_of_seq` snapshot stamp (the rest of WI-4) followed in its own slice — see below.
+
+### WI-4 scope (DONE)
+
+Closes the last non-actorification work item. Two halves: the session/epoch half landed with
+WI-12 (`SessionEpoch`); this slice adds the `as_of_seq` snapshot stamp.
+
+**Counter-A semantics decision.** `record_seq` (Counter A) now advances **once per applied FSM
+event, regardless of whether a transition sink is wired** — previously it only advanced inside
+`try_emit_transition_record`, i.e. only when `transition_tx` was attached. Moving the increment up
+into the `Fsm` arm makes `as_of_seq` meaningful even when only a diagnostic sink (or no sink) is
+present, and keeps a snapshot and the published ledger reconciled on a single counter. The first
+applied event is seq `1`; `as_of_seq == 0` means "no event applied yet" (freshly-born twin). A pure
+`GetStatus` query does **not** advance the counter.
+
+**Reply shape.** `DigitalTwinCarVocabulary::GetStatus` now replies with a new
+`CarSnapshot { car: DigitalTwinCar, as_of_seq: u64 }` instead of a bare `DigitalTwinCar`. The
+snapshot is never "wrong", only *as-of* sequence `N` (Q3 / decision #2); the stamp makes staleness
+legible and reconcilable against the `transition_tx` stream. To avoid churn at the many read sites,
+`CarSnapshot` carries delegating accessors (`identity`/`current_state`/`context`/
+`verify_all_invariants`) plus `car()` and `as_of_seq()`, so existing `snapshot.context()`-style
+calls compile unchanged.
+
+Touched:
+- `digital_twin/mod.rs` — new `CarSnapshot`; `GetStatus(RpcReplyPort<CarSnapshot>)`.
+- `lib.rs` — export `CarSnapshot`.
+- `virtual_car_actor.rs` — assign `record_seq` per `Fsm` event (sink-independent);
+  `try_emit_transition_record` takes the seq as a param; `reply_get_status` builds a stamped
+  `CarSnapshot` with `as_of_seq = next_record_seq - 1`.
+- `vehicle_controller.rs` — `get_snapshot` returns `CarSnapshot`.
+- `test/{scenarios_smoke,controller_api_contract}.rs` — helper return type; new test
+  `given_applied_events_when_get_snapshot_then_as_of_seq_counts_every_event` (0 → 1 → 2, query
+  is non-advancing).
+
+Acceptance met: `cargo build --workspace` and `cargo test --workspace` green; edited files
+clippy-clean. (Re-checked) the existing `record_seq` ordering test still holds because, with a sink
+attached, per-event numbering equals the prior per-emit numbering.
 
 ### WI-7b scope (DONE, agreed a1)
 
@@ -683,9 +767,9 @@ Cheap & high-value **now** (independent of the actor split, and they make the sp
    **Still to finalize (TODO 7):**
    - [x] Field: `PublishedTransitionRecord.sequence_no` → **`record_seq`** (`ledger_seq`),
      leaving `CorrelationId` as the command axis (`command_seq`). **DONE in WI-7b.**
-   - [ ] Give Counter A a **session/epoch** (mirrors `CorrelationId.session_id`) so
+   - [x] Give Counter A a **session/epoch** (mirrors `CorrelationId.session_id`) so
      restarts don't reuse `record_seq` ambiguously (ties to `as_of_seq`, Q3).
-     **Deferred to WI-4 (pending).**
+     **DONE** — session/epoch via WI-12 `SessionEpoch`; `as_of_seq` stamp via WI-4 `CarSnapshot`.
 
 Better done **with actorification** (shape becomes clear once children exist):
 
@@ -718,7 +802,7 @@ Compact, single-glance digest pulled from the Q&A and work-item scopes above. Th
 | WI-1 | Record emitted actions in `RawTransitionRecord` | **DONE** | The ledger now shows *what the FSM decided to do* (intended intents), making no-op actions observable and feeding journey/causality work. |
 | WI-2 | Public pure state-law primitive (`verify_state_laws` + catalog) | **DONE** | Invariants are a pure, named-law *oracle*; an external/offline verifier folds it over a captured stream. No journey helper in the lib (dropped as over-engineering). |
 | WI-3 | `Clock` seam in runtime options | **deferred → actorification** | Pure core is already time-as-input (deterministic at the pure layer). Seam's marginal value is actor-level test determinism; identical now vs post-split, so co-design it with the future ticker actor. |
-| WI-4 | `as_of_seq` snapshot stamp + Counter-A session/epoch | session/epoch **DONE** (WI-12); `as_of_seq` pending | `SessionEpoch` now anchors every run (one wall-clock read, shared by published stamps + actuation `session_id`); `as_of_seq` snapshot legibility still to come. |
+| WI-4 | `as_of_seq` snapshot stamp + Counter-A session/epoch | **DONE** | `SessionEpoch` anchors every run (one wall-clock read, shared by published stamps + actuation `session_id`); `GetStatus` replies `CarSnapshot { car, as_of_seq }` with Counter A advancing per applied FSM event, so snapshot staleness is legible and reconcilable. |
 | WI-12 | Serializable published record (`Instant`→`Duration`-since-`UNIX_EPOCH`) | **DONE** | Monotonic `Instant` *measures* inside; wall-clock `Duration` *places* for the world. New `published` module owns the full lossless mirror + serde; core stays `Instant`-bearing & serde-free. Unblocks file-dump + offline folding. |
 | WI-5 | Reclassify `LogWarning` toward the diagnostic sink | **DONE** | `LogWarning` is observability, not actuation — the actor now routes it to the diagnostic bus instead of the actuation no-op. |
 | WI-6 | Test helper `(controller, actuation_rx)` + ack-injection | **DONE** | `#[cfg(test)]` helpers in `test/mod.rs` reusing `ActorGuard`; ack/nack injected via the real `submit_physical_car_event` ingress path. |

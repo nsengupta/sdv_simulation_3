@@ -21,6 +21,10 @@ pub const DEFAULT_CAN_INTERFACE: &str = "vcan0";
 
 const TIMER_TICK_MS: u64 = 100;
 const ACTUATION_COMMAND_CHANNEL_CAPACITY: usize = 64;
+/// Bound on the off-task ingress-log queue. Logging is best-effort: a frozen console
+/// (Ctrl-S / XOFF) must not stall the CAN ingress dispatch loop (which also delivers ACKs to the
+/// twin), so lines are dropped once this fills.
+const INGRESS_LOG_CHANNEL_CAPACITY: usize = 512;
 
 pub struct GatewayLaunchConfig<'a> {
     pub car_identity: &'a str,
@@ -117,6 +121,15 @@ pub async fn run(launch: GatewayLaunchConfig<'_>) -> Result<()> {
         );
     }
 
+    // Off-hot-path ingress logger: a frozen console must not block ACK delivery to the twin.
+    let (ingress_log_tx, mut ingress_log_rx) =
+        mpsc::channel::<String>(INGRESS_LOG_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        while let Some(line) = ingress_log_rx.recv().await {
+            println!("{line}");
+        }
+    });
+
     let (can_tx, can_rx) = mpsc::unbounded_channel();
     let _can_reader = spawn_can_reader_thread(
         launch.can_interface.to_string(),
@@ -124,7 +137,7 @@ pub async fn run(launch: GatewayLaunchConfig<'_>) -> Result<()> {
         launch.trace_actuation_ingress,
         can_tx,
     )?;
-    run_can_ingress_dispatch_loop(controller, can_rx).await
+    run_can_ingress_dispatch_loop(controller, can_rx, ingress_log_tx).await
 }
 
 fn spawn_timer_tick_loop(controller: VehicleController) {
@@ -243,35 +256,37 @@ fn spawn_front_headlamp_command_publisher(
     });
 }
 
-fn log_front_headlamp_ingress(session: u16, sequence: u32, physical: &PhysicalCarVocabulary) {
-    match physical {
+/// Format the wire-level ingress line for a headlamp ACK/NACK, or `None` for other events.
+/// Formatting only — emitting is the caller's job (off the hot path, via a bounded log channel).
+fn format_front_headlamp_ingress(
+    session: u16,
+    sequence: u32,
+    physical: &PhysicalCarVocabulary,
+) -> Option<String> {
+    let (icon, msg) = match physical {
         PhysicalCarVocabulary::FrontHeadlampCommandConfirmed { on_command: true } => {
-            println!(
-                "[actuation-can-ingress session={session} seq={sequence}]: {ACK_ON} {MSG_ACK_ON}"
-            );
+            (ACK_ON, MSG_ACK_ON)
         }
         PhysicalCarVocabulary::FrontHeadlampCommandConfirmed { on_command: false } => {
-            println!(
-                "[actuation-can-ingress session={session} seq={sequence}]: {ACK_OFF} {MSG_ACK_OFF}"
-            );
+            (ACK_OFF, MSG_ACK_OFF)
         }
         PhysicalCarVocabulary::FrontHeadlampCommandRejected { on_command: true } => {
-            println!(
-                "[actuation-can-ingress session={session} seq={sequence}]: {NACK_ON} {MSG_NACK_ON}"
-            );
+            (NACK_ON, MSG_NACK_ON)
         }
         PhysicalCarVocabulary::FrontHeadlampCommandRejected { on_command: false } => {
-            println!(
-                "[actuation-can-ingress session={session} seq={sequence}]: {NACK_OFF} {MSG_NACK_OFF}"
-            );
+            (NACK_OFF, MSG_NACK_OFF)
         }
-        _ => {}
-    }
+        _ => return None,
+    };
+    Some(format!(
+        "[actuation-can-ingress session={session} seq={sequence}]: {icon} {msg}"
+    ))
 }
 
 async fn run_can_ingress_dispatch_loop(
     controller: VehicleController,
     mut rx: mpsc::UnboundedReceiver<CanIngressEnvelope>,
+    ingress_log_tx: mpsc::Sender<String>,
 ) -> Result<()> {
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -286,11 +301,16 @@ async fn run_can_ingress_dispatch_loop(
                 session,
                 sequence,
             } => {
-                log_front_headlamp_ingress(session, sequence, &physical);
+                // Deliver the ACK/NACK to the twin first; logging is best-effort and off the hot
+                // path (non-blocking `try_send`, dropped on console back-pressure).
+                let line = format_front_headlamp_ingress(session, sequence, &physical);
                 controller
                     .submit_physical_car_event(physical)
                     .await
                     .map_err(|e| anyhow::anyhow!("submit physical car event: {e:?}"))?;
+                if let Some(line) = line {
+                    let _ = ingress_log_tx.try_send(line);
+                }
             }
         }
     }

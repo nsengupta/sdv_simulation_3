@@ -110,6 +110,55 @@ impl DigitalTwinCar {
     }
 }
 
+/// A read-only snapshot returned by [`DigitalTwinCarVocabulary::GetStatus`].
+///
+/// Carries the twin plus `as_of_seq` — the ledger sequence (Counter A, `record_seq`) of the last
+/// FSM event this snapshot reflects. A `GetStatus` reply is never "wrong", only *as-of* a point in
+/// the event stream (Q3 / decision #2): it reflects events with sequence ≤ `as_of_seq`. Stamping it
+/// makes that staleness legible and lets a consumer reconcile a snapshot against the `transition_tx`
+/// ledger. `0` means no FSM event has been applied yet (freshly-born twin).
+#[derive(Debug, Clone)]
+pub struct CarSnapshot {
+    car: DigitalTwinCar,
+    as_of_seq: u64,
+}
+
+impl CarSnapshot {
+    pub fn new(car: DigitalTwinCar, as_of_seq: u64) -> Self {
+        Self { car, as_of_seq }
+    }
+
+    /// Ledger sequence of the last event this snapshot reflects (`0` = none applied yet).
+    pub fn as_of_seq(&self) -> u64 {
+        self.as_of_seq
+    }
+
+    /// The underlying twin value.
+    pub fn car(&self) -> &DigitalTwinCar {
+        &self.car
+    }
+
+    /// Delegating accessor: the twin's identity.
+    pub fn identity(&self) -> &str {
+        self.car.identity()
+    }
+
+    /// Delegating accessor: the twin's current FSM state.
+    pub fn current_state(&self) -> &FsmState {
+        self.car.current_state()
+    }
+
+    /// Delegating accessor: the twin's sensor / health context.
+    pub fn context(&self) -> &VehicleContext {
+        self.car.context()
+    }
+
+    /// Delegating check: run the twin's snapshot invariants (see [`DigitalTwinCar::verify_all_invariants`]).
+    pub fn verify_all_invariants(&self) -> Result<(), String> {
+        self.car.verify_all_invariants()
+    }
+}
+
 /// Actor mailbox vocabulary for the digital twin: FSM traffic plus request/reply such as [`Self::GetStatus`].
 ///
 /// [`FsmEvent`] stays `Clone` and free of [`RpcReplyPort`]; embed domain events via [`Self::Fsm`].
@@ -117,8 +166,9 @@ impl DigitalTwinCar {
 pub enum DigitalTwinCarVocabulary {
     /// Drive the FSM (`crate::fsm::step` derives context from event payloads and computes transitions).
     Fsm(FsmEvent),
-    /// Return a snapshot of the twin; does **not** call [`crate::fsm::transition`].
-    GetStatus(RpcReplyPort<DigitalTwinCar>),
+    /// Return an as-of snapshot of the twin (stamped with `as_of_seq`); does **not** call
+    /// [`crate::fsm::transition`].
+    GetStatus(RpcReplyPort<CarSnapshot>),
 }
 
 impl From<FsmEvent> for DigitalTwinCarVocabulary {

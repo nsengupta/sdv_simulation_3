@@ -10,13 +10,13 @@ use async_trait::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use std::sync::Arc;
 
-use crate::diagnostic::{DiagnosticMessage, DiagnosticSink, TokioMpscDiagnosticSink, diag_state_transition, diag_timer_tick, diag_actuation_failure, diag_warning, diag_transition_sink_full, diag_transition_sink_closed};
-use crate::digital_twin::{DigitalTwinCar, DigitalTwinCarVocabulary};
+use crate::diagnostic::{DiagnosticMessage, DiagnosticSink, TokioMpscDiagnosticSink, diag_front_headlamp_confirmed, diag_state_transition, diag_timer_tick, diag_actuation_failure, diag_warning, diag_transition_sink_full, diag_transition_sink_closed};
+use crate::digital_twin::{CarSnapshot, DigitalTwinCar, DigitalTwinCarVocabulary};
 use crate::engine::controller::actuation_manager::{
     ActuationManager, DefaultActuationManager,
 };
 use crate::engine::controller::vehicle_controller::VehicleControllerRuntimeOptions;
-use crate::fsm::{self, ActorModeHintFromDomain, DomainAction, FsmEvent, FsmState, VehicleContext};
+use crate::fsm::{self, ActorModeHintFromDomain, DomainAction, FrontHeadlampSwitchDirection, FsmEvent, FsmState, LightingState, VehicleContext};
 use crate::published::{PublishedTransitionRecord, SessionEpoch};
 use crate::transition_sink::{TokioMpscTransitionRecordSink, TransitionRecordSink, TransitionSinkError};
 
@@ -158,13 +158,26 @@ impl Actor for VirtualCarActor {
                 let result =
                     fsm::step(runtime_state.twin_car.current_state(), runtime_state.twin_car.context(), &evt, std::time::Instant::now());
                 let old_state = runtime_state.twin_car.current_state().clone();
+                // Capture pre/post headlamp state so a positive ACK that settles
+                // `*Requested → On/Off` can be surfaced on the diagnostic stream (success was
+                // previously silent there, though always recorded in the transition ledger).
+                let headlamp_before = runtime_state.twin_car.context().headlamp.state;
+                let headlamp_after = result.modified_ctx.headlamp.state;
                 let mut mode = ActorMode::Normal;
+
+                // Counter A (WI-4): assign this applied event its ledger sequence here — once per
+                // FSM event, *regardless* of whether a transition sink is wired. This keeps the
+                // `as_of_seq` stamp on `GetStatus` snapshots meaningful even when only a diagnostic
+                // sink (or no sink) is attached. The same sequence is handed to the published
+                // record so a snapshot and the ledger reconcile on a single counter.
+                let record_seq = runtime_state.next_record_seq;
+                runtime_state.next_record_seq = runtime_state.next_record_seq.saturating_add(1);
 
                 // Persist actor state first (non-negotiable ordering before transition log emit).
                 // `apply_step` is the sole mutation path (Q9 / ADR-3).
                 runtime_state.twin_car.apply_step(result.next_state.clone(), result.modified_ctx);
 
-                Self::try_emit_transition_record(runtime_state, result.transition_record);
+                Self::try_emit_transition_record(runtime_state, record_seq, result.transition_record);
 
                 for action in result.actions {
                     match action {
@@ -211,25 +224,57 @@ impl Actor for VirtualCarActor {
                         ));
                     }
                 }
+
+                // Surface a positive headlamp ACK (settle `*Requested → On/Off`) on the
+                // diagnostic stream, symmetric with the NACK/timeout warning path.
+                if let Some(direction) =
+                    front_headlamp_confirmed_direction(headlamp_before, headlamp_after)
+                {
+                    if let Some(sink) = &runtime_state.diagnostic_sink {
+                        let _ = sink.try_emit(diag_front_headlamp_confirmed(
+                            runtime_state.twin_car.identity(),
+                            direction,
+                        ));
+                    }
+                }
                 let _ = mode;
                 Ok(())
             }
-            GetStatus(reply) => Self::reply_get_status(reply, &runtime_state.twin_car),
+            GetStatus(reply) => Self::reply_get_status(
+                reply,
+                &runtime_state.twin_car,
+                // as-of: the last event sequence applied so far (0 before any event).
+                runtime_state.next_record_seq.saturating_sub(1),
+            ),
         }
+    }
+}
+
+/// Classify a headlamp state change as a positive ACK settle, if any.
+///
+/// `On` is only reachable via an ON-ack and `Off` (from `OffRequested`) only via an OFF-ack; a
+/// *failed* OFF recovers to `On` and a failed ON recovers to `Off`, so matching the exact
+/// `*Requested → settled` pair flags success only (no false positives from recovery).
+fn front_headlamp_confirmed_direction(
+    before: LightingState,
+    after: LightingState,
+) -> Option<FrontHeadlampSwitchDirection> {
+    match (before, after) {
+        (LightingState::OnRequested, LightingState::On) => Some(FrontHeadlampSwitchDirection::On),
+        (LightingState::OffRequested, LightingState::Off) => Some(FrontHeadlampSwitchDirection::Off),
+        _ => None,
     }
 }
 
 impl VirtualCarActor {
     fn try_emit_transition_record(
         runtime_state: &mut VirtualCarRuntimeState,
+        record_seq: u64,
         transition_record: fsm::RawTransitionRecord,
     ) {
         let Some(sink) = &runtime_state.transition_sink else {
             return;
         };
-
-        let record_seq = runtime_state.next_record_seq;
-        runtime_state.next_record_seq = runtime_state.next_record_seq.saturating_add(1);
 
         // Project the pure (Instant-bearing) record into its serializable, wall-stamped form.
         let published = PublishedTransitionRecord::project(
@@ -257,14 +302,15 @@ impl VirtualCarActor {
     }
 
     fn reply_get_status(
-        reply: RpcReplyPort<DigitalTwinCar>,
+        reply: RpcReplyPort<CarSnapshot>,
         twin_car: &DigitalTwinCar,
+        as_of_seq: u64,
     ) -> Result<(), ActorProcessingErr> {
         if reply.is_closed() {
             return Ok(());
         }
         reply
-            .send(twin_car.clone())
+            .send(CarSnapshot::new(twin_car.clone(), as_of_seq))
             .map_err(|e| std::io::Error::other(format!("GetStatus reply: {e:?}")))?;
         Ok(())
     }

@@ -3,7 +3,8 @@
 //! The twin emits [`DiagnosticMessage`] values through an injected channel.
 //! The runtime decides who reads the RX side and how to display them.
 
-use crate::fsm::{FsmState, VehicleContext};
+use crate::front_headlamp_log::{ACK_OFF, ACK_ON, MSG_ACK_OFF, MSG_ACK_ON};
+use crate::fsm::{FrontHeadlampSwitchDirection, FsmState, VehicleContext};
 use crate::vehicle_constants::{
     extreme_operation_active, speed_threshold_exceeded, SPEED_EXTREME_OPERATION_THRESHOLD_KPH,
 };
@@ -177,6 +178,24 @@ pub fn diag_actuation_failure(identity: &str, action: &str, err: &str) -> Diagno
 /// diagnostic sink rather than through the actuation path.
 pub fn diag_warning(identity: &str, message: &str) -> DiagnosticMessage {
     DiagnosticMessage::warning("VirtualCarActor", format!("[{identity}]: {message}"))
+}
+
+/// Info diagnostic surfaced when a front-headlamp command is **positively acknowledged**.
+///
+/// Symmetric with the NACK/timeout warning path (`diag_warning` ← `DomainAction::LogWarning`): a
+/// clean ACK used to be silent on the diagnostic stream even though it was recorded in the
+/// transition ledger (`old_ctx`→`current_ctx`). The actor emits this from the step result when the
+/// lighting state settles `*Requested → On/Off`. Wording matches the gateway ingress line so the
+/// two surfaces read identically.
+pub fn diag_front_headlamp_confirmed(
+    identity: &str,
+    direction: FrontHeadlampSwitchDirection,
+) -> DiagnosticMessage {
+    let (icon, msg) = match direction {
+        FrontHeadlampSwitchDirection::On => (ACK_ON, MSG_ACK_ON),
+        FrontHeadlampSwitchDirection::Off => (ACK_OFF, MSG_ACK_OFF),
+    };
+    DiagnosticMessage::info("VirtualCarActor", format!("[{identity}]: {icon} {msg}"))
 }
 
 pub fn diag_transition_sink_full(identity: &str) -> DiagnosticMessage {

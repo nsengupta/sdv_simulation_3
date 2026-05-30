@@ -71,6 +71,54 @@ async fn given_controller_when_get_snapshot_called_then_returns_readonly_snapsho
 }
 
 #[tokio::test]
+async fn given_applied_events_when_get_snapshot_then_as_of_seq_counts_every_event() {
+    let (actor, handle) = Actor::spawn(None, VirtualCarActor::default(), "CTRL-API-04".into())
+        .await
+        .expect("spawn actor");
+    let _guard = ActorGuard {
+        addr: actor.clone(),
+        handle,
+    };
+    let controller = VehicleController::new(actor);
+
+    // Freshly-born twin: no event applied yet → as-of sequence is 0.
+    let fresh = controller
+        .get_snapshot(Some(Duration::from_millis(250)))
+        .await
+        .expect("snapshot");
+    assert_eq!(fresh.as_of_seq(), 0);
+
+    // Each applied FSM event advances Counter A by exactly one, sink or not.
+    controller
+        .submit_fsm_event(FsmEvent::PowerOn)
+        .await
+        .expect("power on should enqueue");
+    let after_one = controller
+        .get_snapshot(Some(Duration::from_millis(250)))
+        .await
+        .expect("snapshot");
+    assert_eq!(after_one.as_of_seq(), 1);
+
+    controller
+        .submit_physical_car_event(PhysicalCarVocabulary::TelemetryUpdate(
+            crate::VssSignal::EngineRpm(1500),
+        ))
+        .await
+        .expect("telemetry should enqueue");
+    let after_two = controller
+        .get_snapshot(Some(Duration::from_millis(250)))
+        .await
+        .expect("snapshot");
+    assert_eq!(after_two.as_of_seq(), 2);
+    // A pure query does not advance the ledger.
+    let again = controller
+        .get_snapshot(Some(Duration::from_millis(250)))
+        .await
+        .expect("snapshot");
+    assert_eq!(again.as_of_seq(), 2);
+}
+
+#[tokio::test]
 async fn given_power_on_then_power_off_facade_when_idle_then_state_is_off() {
     let (actor, handle) = Actor::spawn(None, VirtualCarActor::default(), "CTRL-API-03".into())
         .await

@@ -14,7 +14,7 @@ const DEFAULT_ACTOR_TIMEOUT: Duration = Duration::from_millis(250);
 async fn get_snapshot(
     actor: &ractor::ActorRef<DigitalTwinCarVocabulary>,
     timeout: Duration,
-) -> crate::DigitalTwinCar {
+) -> crate::CarSnapshot {
     use ractor::rpc::CallResult;
 
     match actor

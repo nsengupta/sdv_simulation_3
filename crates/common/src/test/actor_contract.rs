@@ -167,6 +167,61 @@ async fn scenario_actuation_ack_round_trip_via_helper() {
 }
 
 #[tokio::test]
+async fn scenario_actuation_ack_surfaces_confirmation_on_diagnostic_sink() {
+    // A positive headlamp ACK (settle `OnRequested -> On`) must surface on the diagnostic stream
+    // as an Info-level confirmation — symmetric with the NACK/timeout Warning path, which was
+    // previously the only actuation outcome visible there.
+    let (diag_tx, mut diag_rx) = mpsc::unbounded_channel();
+    let (actuation_tx, _actuation_rx) = mpsc::channel(16);
+
+    let runtime_options = VehicleControllerRuntimeOptions {
+        diagnostic_tx: Some(diag_tx),
+        actuation_command_tx: Some(actuation_tx),
+        ..VehicleControllerRuntimeOptions::default()
+    };
+
+    let (controller, handle) = VehicleController::install_and_start_with_options(
+        "ACT-ACK-DIAG-01".to_string(),
+        runtime_options,
+    )
+    .await
+    .expect("Failed to start DigitalTwin Actor with diagnostic + actuation sinks");
+    let _guard = ActorGuard {
+        addr: controller.get_actor_ref().clone(),
+        handle,
+    };
+
+    controller.send_power_on().await.expect("power on");
+    controller
+        .submit_physical_car_event(PhysicalCarVocabulary::TelemetryUpdate(VssSignal::AmbientLux(
+            20,
+        )))
+        .await
+        .expect("low lux event requests headlamp ON");
+    controller
+        .submit_physical_car_event(PhysicalCarVocabulary::FrontHeadlampCommandConfirmed {
+            on_command: true,
+        })
+        .await
+        .expect("inject matching ON ack");
+
+    let mut saw_confirmation = false;
+    while let Ok(Some(msg)) =
+        tokio::time::timeout(Duration::from_millis(250), diag_rx.recv()).await
+    {
+        if msg.level == crate::DiagnosticLevel::Info && msg.message.contains(crate::MSG_ACK_ON) {
+            saw_confirmation = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_confirmation,
+        "a positive headlamp ACK should surface as an Info-level confirmation diagnostic"
+    );
+}
+
+#[tokio::test]
 async fn scenario_actuation_nack_round_trip_via_helper() {
     let (controller, mut actuation_rx, _guard) = install_with_actuation("ACT-NACK-01", 16).await;
 
