@@ -67,12 +67,15 @@ impl PhysicalWorldModelConfig {
                 baseline_daylight_lux: 850,
                 // ±35 → ~815–885 lux; crosses LUX_ON (840) / LUX_OFF (860) for headlamp demo cycles.
                 jitter_amplitude_lux: 35,
+                // Default ≈ a tunnel every ~10 s (demo-friendly); override at startup with
+                // `EMULATOR_TUNNEL_PROB` (e.g. 0.002 for infrequent tunnels). See `main.rs`.
                 tunnel_event_probability_per_tick: 0.01,
                 tunnel_lux_drop: 900,
                 tunnel_duration_ticks_min: 20,
                 tunnel_duration_ticks_max: 80,
-                // TODO(profile-injection): accept handcrafted profile/config selection at
-                // startup (test/demo/realistic) instead of relying on one hardcoded profile.
+                // TODO(profile-injection): accept full handcrafted profile selection at startup
+                // (test/demo/realistic). Today only `tunnel_event_probability_per_tick` is
+                // env-overridable (`EMULATOR_TUNNEL_PROB`); the rest of the profile is fixed.
                 cycle_secs: 90,
             },
         }

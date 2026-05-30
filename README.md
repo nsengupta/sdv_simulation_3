@@ -246,6 +246,16 @@ cargo run -p front_headlamp_actuator
 
 Default actuator (no env): `cargo run -p front_headlamp_actuator` — always responds after ~150 ms, ~70% ACK / ~30% NACK.
 
+**Emulator with tunnel-frequency env** (terminal A — controls how often low-lux tunnels drive the headlamp ON; value in `0.0`..=`1.0`):
+
+```bash
+EMULATOR_TUNNEL_PROB=0.002 cargo run -p emulator
+```
+
+| Variable             | Example | Effect                                                                                          |
+| -------------------- | ------- | ----------------------------------------------------------------------------------------------- |
+| `EMULATOR_TUNNEL_PROB` | `0.002` | Per-100 ms-tick probability of entering a tunnel. Default (unset) `0.01` ≈ a tunnel every ~10 s (demo-frequent); `0.002` ≈ every ~50 s, `0.001` ≈ every ~100 s (infrequent). |
+
 **Teardown:** `Ctrl+C` each process; `sudo ip link del vcan0`.
 
 Change `DEFAULT_CAN_INTERFACE` in emulator, actuator, and `gateway_runtime` if not using `vcan0`.
