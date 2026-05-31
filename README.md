@@ -126,6 +126,19 @@ VehicleContext
 
 > This is in preparation for the zone-actor plan, where each assembly's `impl` block becomes a child actor's local state + flat FSM. The aggregate's fields stay public **only** as a compile-compatibility shim during the transition.
 
+### Actor turn contract
+
+One mailbox message → one authoritative cut. The actor loop is fixed-order:
+
+1. `fsm::step(...)` — pure decision (context update, operational FSM, intended actions).
+2. `twin_car.apply_step(...)` — persist.
+3. Emit transition record — **after** persist, **before** actuation (captures intent, not outcome).
+4. Execute actions — actuation manager takes an **immutable** twin ref; no `step()` re-entry in the same turn.
+
+**`RequestFrontHeadlampOn` does not flip the lamp in the action phase.** Inside `step()`, lux crossing the threshold moves lighting to `OnRequested` and emits the command; `On` arrives only when a later ACK event runs through `step()`. ACK/NACK on CAN becomes a **new** mailbox event.
+
+Each ledger record lists **intended** `DomainAction`s from that step. Runtime-only hints (e.g. actor mode) are filtered out of the stored record; ACK, NACK, timeout, and failure remain separate facts. See `crates/common/src/fsm/step.rs` and `crates/common/src/engine/controller/virtual_car_actor.rs`.
+
 ---
 
 ## Observability: a fact ledger, not just logs
@@ -150,6 +163,17 @@ who is listening. (These are the sinks shown in the architecture diagram.)
 Each `RawTransitionRecord` now also carries the **intended `DomainAction`s** the pure step emitted (intents, *not* outcomes — ACK/timeout/failure stay separate facts). A serializable **`published`** mirror projects every `Instant` to a wall-clock `Duration` so a "dumb writer → file → offline verifier" pipeline is possible: monotonic `Instant` *measures* time inside the core; `Duration` *places* records for the outside world.
 
 `GetStatus` replies with a stamped `CarSnapshot { car, as_of_seq }`: a snapshot is never "wrong", only *as-of* sequence `N`, and the stamp makes staleness legible and reconcilable against the ledger.
+
+**Later:** state-transition lines like "Transitioned to Driving…" should eventually be **derived from the ledger** by an observer, not emitted separately alongside it.
+
+### Live-run hardening (console back-pressure)
+
+A live run with `Ctrl-S` / `Ctrl-Q` (XOFF/XON) exposed two gaps, both fixed in this repo:
+
+| Gap | Fix | Where |
+| --- | --- | --- |
+| Clean headlamp ACK was silent on the diagnostic stream (ledger had the context diff) | Compare `headlamp.state` before/after `step()`; emit `diag_front_headlamp_confirmed` on `*Requested → On/Off` | `crates/common/src/engine/controller/virtual_car_actor.rs` |
+| Synchronous logging on the CAN ingress / actuator loop could stall protocol handling | Bounded log queue, non-blocking `try_send`, drop-on-full; gateway submits ACK/NACK to the twin **before** logging | `crates/gateway/src/gateway_runtime.rs`, `crates/front_headlamp_actuator/src/main.rs` |
 
 ---
 
@@ -347,7 +371,7 @@ Major milestones ahead (not in priority order). Carries forward open items from
 
 - **Actorification** — parent FSM actor + per-zone child actors (assemblies → actors); unified diagnostic fan-in
 - **Observability & audit** — single-writer ledger actor, correlation IDs end-to-end, diagnostics-as-projection of the ledger; offline file writer + folding verifier
-- **Actuation resilience** — bounded retry/backoff, dedup of pending requests, explicit degraded/`Unknown` lighting state
+- **Actuation resilience** — when the actuator is down or dropping responses, lux-driven reconcile currently re-requests every telemetry tick and emits a timeout warning every tick (unbounded command spam, no recovery). Next iteration: bounded retry/backoff, dedup of pending requests, explicit degraded/`Unknown` lighting state, rate-limited "peer persistently unavailable" diagnostic. Design input: **WI-13** in [`docs/design-notes-runtime-observation.md`](docs/design-notes-runtime-observation.md) (anchors: `crates/common/src/fsm/assembly/front_headlamp.rs`).
 - **Observed-speed ECU & fusion** — wire path for `0x101` vs RPM-derived kinematic speed
 - **Standards alignment** — official COVESA VSS / databroker; DBC-driven CAN IDs
 - **Transport & scale-up** — CLI/env CAN interface; additional `vehicle_device_bus` devices and zones

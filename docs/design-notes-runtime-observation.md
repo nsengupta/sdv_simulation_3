@@ -1001,6 +1001,16 @@ Compact, single-glance digest pulled from the Q&A and work-item scopes above. Th
 - **WI-6:** **DONE** — `#[cfg(test)]` helpers return `(controller, actuation_rx, guard)` plus
   one-liner ack/nack injectors that round-trip through the real physical-ingress path
   (see WI-6 scope).
+- **WI-13:** **STILL OPEN → next iteration (fresh clone).** Actuation resilience when the
+  peer is down or dropping responses. Observed in a live run (2026-05-30): with the actuator
+  unavailable, lux-driven reconcile re-requests every telemetry tick and
+  `HeadlampContext::on_timer_tick` emits a timeout warning every tick → unbounded identical
+  commands + per-tick diagnostic spam, no recovery. Needs: max-retry + backoff, dedup of
+  identical pending requests, an explicit `LightingState::Unknown`/degraded terminal state,
+  and a rate-limited / once-only "peer persistently unavailable" diagnostic. Overlaps WI-9/WI-8
+  but dedup/backoff is doable standalone. Anchors:
+  `crates/common/src/fsm/assembly/front_headlamp.rs` (`evaluate_lux`, `on_timer_tick`,
+  `recover_incomplete`). See also the live-run bullet under **Surfaced this iteration** above.
 - **Actorification (WI-8..11):** single-writer ledger actor owns `record_seq`; correlation
   IDs threaded action→command→feedback→record (causal DAG); state-transition diagnostics
   become a projection of the ledger; buzzer/egress I/O moves into the actuation child actor.

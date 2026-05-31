@@ -237,6 +237,8 @@ impl Actor for VirtualCarActor {
                         ));
                     }
                 }
+                // `mode` is reserved for future actor behaviour (e.g. pacing or backpressure
+                // hints once child actors exist); not wired yet.
                 let _ = mode;
                 Ok(())
             }
