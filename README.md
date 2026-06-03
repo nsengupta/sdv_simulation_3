@@ -1,18 +1,21 @@
-<!--
-DRAFT README for Iteration 2 — generated for the author to edit.
-Operational sections (run / tests / wire protocol / crates) are carried over and
-verified against the current tree. Framing/architecture/decisions are rewritten to
-reflect what actually changed since Iteration 1. Remove this comment before publishing.
--->
-
-# SDV simulation (Iteration 2) — repository overview
+# SDV simulation 3 (`sdv_simulation_3`) — repository overview
 
 ---
 
-↩️This repo is the **Iteration 2** of a software-defined-vehicle (#SDV) prototype. It builds directly on **Iteration 1** (processes, CAN bus, the actor+FSM twin):
-**[Iteration 1 — repository & README](https://github.com/nsengupta/sdv_simulation_1#readme)**.
+**Repository:** `sdv_simulation_3` (local / GitHub name). **Lineage:** cloned from
+[`sdv_simulation_2`](https://github.com/nsengupta/sdv_simulation_2) (Iteration 2 baseline);
+umbilical to sim_2 is cut — sim_2 stays the frozen comparison tree.
 
-This README is the **current truth** for running and reading the code.
+**Blog / narrative iterations** (written afresh after repo milestones, not ahead of them):
+
+| Iteration (blog) | Repository        | Role |
+| ---------------- | ----------------- | ---- |
+| 1                | `sdv_simulation_1` | Control loop works |
+| 2                | `sdv_simulation_2` | Decompose, observe, prove (frozen) |
+| 3                | **`sdv_simulation_3`** | Pyramid cleanup → actorification |
+
+This README is the **current truth** for running and reading the code. Prior iteration:
+**[Iteration 1 — README](https://github.com/nsengupta/sdv_simulation_1#readme)**.
 
 ---
 
@@ -24,25 +27,22 @@ This is an educational / demonstrator codebase, not a product stack.
 
 ---
 
-## What this iteration is about (and what it deliberately is *not*)
+## What this repository is doing now
 
-If you ran Iteration 1 and Iteration 2 side by side, **you could not tell them apart**: the
-processes, the CAN wire protocol, the FSM behaviour, and the on-screen output are the same; well, not exactly, but very much the same.
+**Inherited from Iteration 2 (sim_2):** same three processes, CAN wire, and user-visible
+behaviour — zone assemblies, transition ledger, diagnostics, correct-by-construction twin.
 
-That is intentional. **Iteration 1 made the control loop *work*. Iteration 2 makes it
-*decomposable, observable, and provable*** — restructuring the internals and tightening the contracts so that the *next* iteration can split the monolithic twin into concurrent
-per-zone child actors ("actorification") without a (major) rewrite.
+**Active on `main` (pyramid track):** restructure `common` into L0–L6 layers (`vehicle_physics`,
+`vehicle_state`, `fsm`, `digital_twin`, `twin_runtime`, …), eliminate module back-edges,
+then L1 assembly alphabets + L4 demux per
+[`docs/adr-005-assembly-alphabet.md`](docs/adr-005-assembly-alphabet.md). Design map:
+[`docs/design-notes-pyramid-layers.md`](docs/design-notes-pyramid-layers.md).
 
-So this is a **refactor-and-contracts milestone**. The interesting work is underneath the
-surface. Three threads run through it:
+**After pyramid cleanup (~zero cycles):** per-zone **child actors** and runtime WIs (ledger actor,
+correlation, actuation child, …) — blog **Iteration 3** narrative; work stays in this repo,
+likely on `milestone/actor-*` branches.
 
-1. **Decompose the twin's state to mirror the car's physical zones** (powertrain, body lighting, health, visibility) — *before* making them concurrent.
-2. **Turn observation into a first-class, portable contract** 
-   1. a serializable and **potentially replayable** transition ledger you can replay and audit 
-      offline. 
-   2. a separate, best-effort, human diagnostic bus.
-3. **Make illegal states hard to represent and easy to detect** — enforce in the FSM,
-   announce via diagnostics, detect offline with a pure law catalog.
+**Not in scope yet:** full actorification; offline file-writer + folding verifier (designed, unbuilt).
 
 ---
 
@@ -61,8 +61,10 @@ surface. Three threads run through it:
 | **Logging**           | synchronous on the protocol path                      | **bounded side-channel**, drop-on-full, off the hot path (a live `Ctrl-S`/XOFF freeze proved this mattered)                            |
 | **Emulator**          | fixed tunnel cadence                                  | `EMULATOR_TUNNEL_PROB` env knob                                                                                                        |
 
-Future plan: Everything tagged *actorification* in the design log is **deliberately deferred to 
-the next iteration** (a fresh cloned project): single-writer ledger actor, end-to-end correlation IDs, diagnostics-as-projection, an actuation child actor, and actuation resilience (retry/backoff/dedup/circuit-breaker).
+**Deferred until pyramid gate, then actor track:** single-writer ledger actor, end-to-end
+correlation IDs, diagnostics-as-projection, actuation child actor, actuation resilience
+(retry/backoff/dedup) — see Roadmap and
+[`docs/design-notes-runtime-observation.md`](docs/design-notes-runtime-observation.md).
 
 ---
 
@@ -255,7 +257,7 @@ These are documented **non-goals for the milestone**, not oversights.
 
 | Crate                                                            | Responsibility                                                                                                                                                                                                                                                                               |
 | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [**`common`**](crates/common/)                                   | VSS encode/decode, vocabularies, projection, FSM + `step`, **per-assembly contexts** (`vehicle_state/*`), **`published`** serializable mirror, `VirtualCarActor`, `VehicleController`, actuation manager, state-law catalog, `vehicle_physics`, `front_headlamp_log`. |
+| [**`common`**](crates/common/)                                   | L0–L5 pyramid in one crate (see module docs + [`docs/design-notes-pyramid-layers.md`](docs/design-notes-pyramid-layers.md)): VSS, projection, FSM + `step`, `vehicle_state/*`, `digital_twin`, `twin_runtime` / `VirtualCarActor`, `published`, facade. |
 | [**`vehicle_device_bus`**](crates/vehicle_device_bus/)           | Front-headlamp CAN codec, wire kinds, ingress policy.                                                                                                                                                                                                                                        |
 | [**`emulator`**](crates/emulator/)                               | World models (RPM target tracking, lux jitter/tunnels) → telemetry frames.                                                                                                                                                                                                                   |
 | [**`gateway`**](crates/gateway/)                                 | `main` + `gateway_runtime`: install twin, CAN loop, timer tick, CMD TX, bounded log side-channel.                                                                                                                                                                                            |
@@ -364,22 +366,26 @@ Change `DEFAULT_CAN_INTERFACE` in emulator, actuator, and `gateway_runtime` if n
 
 ---
 
-## Roadmap
+## Roadmap (`sdv_simulation_3`)
 
-Major milestones ahead (not in priority order). Carries forward open items from
-[Iteration 1](https://github.com/nsengupta/sdv_simulation_1#roadmap) plus this iteration's actorification track.
+Work on **`main`** until pyramid cleanup is ~done; then feature branches (`milestone/actor-*`, etc.).
 
-- **Actorification** — parent FSM actor + per-zone child actors (assemblies → actors); unified diagnostic fan-in
-- **Observability & audit** — single-writer ledger actor, correlation IDs end-to-end, diagnostics-as-projection of the ledger; offline file writer + folding verifier
-- **Actuation resilience** — when the actuator is down or dropping responses, lux-driven reconcile currently re-requests every telemetry tick and emits a timeout warning every tick (unbounded command spam, no recovery). Next iteration: bounded retry/backoff, dedup of pending requests, explicit degraded/`Unknown` lighting state, rate-limited "peer persistently unavailable" diagnostic. Design input: **WI-13** in [`docs/design-notes-runtime-observation.md`](docs/design-notes-runtime-observation.md) (anchors: `crates/common/src/vehicle_state/front_headlamp.rs`).
-- **Observed-speed ECU & fusion** — wire path for `0x101` vs RPM-derived kinematic speed
-- **Standards alignment** — official COVESA VSS / databroker; DBC-driven CAN IDs
-- **Transport & scale-up** — CLI/env CAN interface; additional `vehicle_device_bus` devices and zones
-- **Structured egress** — beyond stdout (Zenoh, uProtocol, HMI/dashboard)
-- **Richer emulation** — ECU profiles and world models
-- **`Clock` seam** — injectable time at the actor boundary (pairs with the future timer/ticker child)
+**Pyramid (in progress on `main`):**
+
+- L1 assembly alphabets (`{Zone}State` / `Message` / `Outcome`) — ADR-5
+- L4 demux; remove `fsm::step` → headlamp inline coupling; **zero module cycles** (TangleGuard)
+- `sdv_core` crate split (L0–L2 boundary)
+- Facade / published paths; gateway e2e via diagnostics where tests allow
+
+**Actor track (after pyramid gate; blog Iteration 3):**
+
+- Per-zone child actors (headlamp first); parent FSM orchestration; unified diagnostic fan-in (WI-14)
+- Single-writer ledger actor, correlation IDs, diagnostics-as-projection (WI-8–10)
+- Actuation child + resilience (WI-11, WI-13); `Clock` seam (WI-3)
+- Offline ledger file writer + folding verifier
+
+**Later (any iteration):** observed-speed ECU / fusion, COVESA VSS, transport scale-up, structured egress, richer emulation. See also [Iteration 1 roadmap](https://github.com/nsengupta/sdv_simulation_1#roadmap).
 
 ---
 
-*Keep the blog as the narrative arc; keep this README as the current truth. Update this file
-when user-visible behaviour or repo layout changes.*
+*Blog posts are drafted after repo milestones land. This README stays the operational truth — update when behaviour or layout changes.*

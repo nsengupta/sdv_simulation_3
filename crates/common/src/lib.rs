@@ -1,16 +1,27 @@
-// Sibling order is *dependee before dependent* (foundation first), not "flow" order.
-// `digital_twin` imports `fsm`; `fsm` does not import `digital_twin`.
+//! One-crate library pyramid — layer map in `docs/design-notes-pyramid-layers.md`.
+//!
+//! Sibling order is *dependee before dependent* (foundation first), not runtime data-flow order.
+//!
+//! - **L0** `vehicle_physics` — constants and pure kinematics
+//! - **L1** `vehicle_state`, `domain_types`, `signals`, `front_headlamp_log`
+//! - **L2** `fsm` — pure decision core (`step`, `transition_map`); imports L0/L1 only
+//! - **L3** `digital_twin`, `published` — twin capsule and serde projection
+//! - **L4** `transition_sink`, `diagnostic`, `twin_runtime` — actor runtime and I/O sinks
+//! - **L5** `facade` — public surface for gateway / L6 binaries
+//!
+//! Acyclic among core layers: `fsm` does not import `digital_twin` or `twin_runtime`;
+//! `digital_twin` imports `fsm` and `vehicle_state`; `twin_runtime` sits above `digital_twin`.
 pub mod vehicle_physics;
 pub mod vehicle_state;
 pub mod domain_types;
-pub mod twin_runtime;
+pub mod signals;
+pub mod front_headlamp_log;
 pub mod fsm;
 pub mod digital_twin;
-pub mod signals;
 pub mod published;
 pub mod transition_sink;
-pub mod front_headlamp_log;
 pub mod diagnostic;
+pub mod twin_runtime;
 pub mod facade;
 
 #[cfg(test)]

@@ -1,7 +1,12 @@
-//! Digital twin runtime model: snapshot, invariants, and actor mailbox vocabulary.
+//! **L3** twin state capsule: snapshot, invariants, and actor mailbox vocabulary.
 //!
-//! Depends on [`crate::fsm`] for [`FsmState`] and [`FsmEvent`], and on
-//! [`crate::vehicle_state`] for [`VehicleContext`] — the FSM crate module does not reference this layer.
+//! Depends on [`crate::fsm`] (L2) for [`FsmState`] and [`FsmEvent`], and on
+//! [`crate::vehicle_state`] (L1) for [`VehicleContext`]. State laws in
+//! [`car_behaviour_checker`] pair L0 constants from [`crate::vehicle_physics`] with L2 enforce paths.
+//!
+//! The pure decision core does not import this module (no `fsm → digital_twin` edge).
+//! Runtime orchestration lives in [`crate::twin_runtime`] (L4). See
+//! `docs/design-notes-pyramid-layers.md`.
 
 mod car_behaviour_checker;
 

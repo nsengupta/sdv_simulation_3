@@ -20,9 +20,11 @@ Anchors in the code at time of writing:
 
 ## ⏯️ ITERATION HANDOFF — read this first when resuming
 
-**As of 2026-05-30 (branch `refactor/assemblies`).** This is the authoritative "where we are /
-what's next" snapshot; the full ledger is further below. Rule of record: **anything tagged
-*actorification* moves to a fresh cloned project — do NOT do it in this repo.**
+**As of 2026-05-30 (branch `refactor/assemblies`, repo `sdv_simulation_2`).** Historical handoff
+for sim_2. **Superseded for active work:** actorification and pyramid completion run in
+**`sdv_simulation_3`** (`main` until pyramid ~done, then `milestone/actor-*`). See
+[`adr-005-assembly-alphabet.md`](adr-005-assembly-alphabet.md) and the sim_3 README. The rule
+below applied to sim_2 only — do not treat it as "clone a fourth repo."
 
 ### Done & committed in this repo
 WI-1, WI-2, **WI-4**, WI-5, WI-6, WI-7a, WI-7b, and **WI-12** (serializable published
