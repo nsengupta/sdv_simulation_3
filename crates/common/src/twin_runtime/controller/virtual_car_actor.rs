@@ -20,7 +20,8 @@ use crate::fsm::{
     self, ActorModeHintFromDomain, DomainAction, FrontHeadlampSwitchDirection, FsmEvent, FsmState,
     HeadlampState,
 };
-use crate::twin_runtime::twin_turn;
+use crate::twin_runtime::headlamp_actor::{HeadlampActor, HeadlampActorVocabulary};
+use crate::twin_runtime::brain_twin_turn;
 use crate::vehicle_state::VehicleContext;
 use crate::published::{PublishedTransitionRecord, SessionEpoch};
 use crate::transition_sink::{TokioMpscTransitionRecordSink, TransitionRecordSink, TransitionSinkError};
@@ -51,6 +52,7 @@ impl From<&str> for VirtualCarActorArgs {
 
 pub struct VirtualCarRuntimeState {
     twin_car: DigitalTwinCar,
+    headlamp_actor: ActorRef<HeadlampActorVocabulary>,
     next_record_seq: u64,
     /// Monotonic↔wall anchor for this run; the sole source of wall-clock stamps on published
     /// records and of the actuation `session_id`.
@@ -133,8 +135,13 @@ impl Actor for VirtualCarActor {
                 Arc::new(manager)
             };
 
+        let initial_ctx = VehicleContext::default();
+        let (headlamp_actor, _) =
+            ractor::spawn::<HeadlampActor>(initial_ctx.headlamp.clone()).await?;
+
         Ok(VirtualCarRuntimeState {
-            twin_car: DigitalTwinCar::new(identity, FsmState::Off, VehicleContext::default())?,
+            twin_car: DigitalTwinCar::new(identity, FsmState::Off, initial_ctx)?,
+            headlamp_actor,
             next_record_seq: 1,
             session_epoch,
             runtime_options: args.runtime_options,
@@ -160,12 +167,15 @@ impl Actor for VirtualCarActor {
                         let _ = sink.try_emit(diag_timer_tick(runtime_state.twin_car.identity()));
                     }
                 }
-                let result = twin_turn(
+                let now = std::time::Instant::now();
+                let result = brain_twin_turn(
+                    &runtime_state.headlamp_actor,
                     runtime_state.twin_car.current_state(),
                     runtime_state.twin_car.context(),
                     &evt,
-                    std::time::Instant::now(),
-                );
+                    now,
+                )
+                .await?;
                 let old_state = runtime_state.twin_car.current_state().clone();
                 // Capture pre/post headlamp state so a positive ACK that settles
                 // `*Requested → On/Off` can be surfaced on the diagnostic stream (success was
@@ -258,6 +268,17 @@ impl Actor for VirtualCarActor {
                 runtime_state.next_record_seq.saturating_sub(1),
             ),
         }
+    }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        runtime_state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        // Interim: brain stops the headlamp twinlet here. Target: assembly actors stop before
+        // the brain (supervisor-ordered teardown), not brain-owned child stop — see milestone doc.
+        runtime_state.headlamp_actor.stop(None);
+        Ok(())
     }
 }
 

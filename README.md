@@ -32,19 +32,15 @@ This is an educational / demonstrator codebase, not a product stack.
 **Inherited from Iteration 2 (sim_2):** same three processes, CAN wire, and user-visible
 behaviour — zone assemblies, transition ledger, diagnostics, correct-by-construction twin.
 
-**Active on `main` (pyramid track):** restructure `common` into L0–L6 layers (`vehicle_physics`,
-`vehicle_state`, `fsm`, `digital_twin`, `twin_runtime`, …), eliminate module back-edges,
-then L1 assembly alphabets + L4 demux per
-[`docs/adr-005-assembly-alphabet.md`](docs/adr-005-assembly-alphabet.md). Target twin brain /
-ingress / power coordination:
-[`docs/adr-006-twin-brain-ingress-coordination.md`](docs/adr-006-twin-brain-ingress-coordination.md).
+**Pyramid (module layers in `common`) — complete on `main`:** L0–L6 layout, ADR-5 alphabets (M1),
+L4 demux / `twin_turn` (M2), **TangleGuard clean**. Tagged: `pyramid-m2-complete` (see below).
 Layer map: [`docs/design-notes-pyramid-layers.md`](docs/design-notes-pyramid-layers.md).
+**Deferred:** `sdv_core` crate split (packaging only; same boundaries already hold as modules).
 
-**ADR series (architecture):** `docs/adr-005-*.md` (L1 alphabets) → `docs/adr-006-*.md` (brain & ingress).
+**Active next (actor track, branch off tagged `main`):** per-zone child actors and ADR-6 brain
+features — blog **Iteration 3**; start from `milestone/actor-headlamp` (or similar).
 
-**After pyramid cleanup (~zero cycles):** per-zone **child actors** and runtime WIs (ledger actor,
-correlation, actuation child, …) — blog **Iteration 3** narrative; work stays in this repo,
-likely on `milestone/actor-*` branches.
+**ADR series:** `docs/adr-005-*.md` (L1 alphabets) → `docs/adr-006-*.md` (target brain & ingress).
 
 **Not in scope yet:** full actorification; offline file-writer + folding verifier (designed, unbuilt).
 
@@ -372,16 +368,10 @@ Change `DEFAULT_CAN_INTERFACE` in emulator, actuator, and `gateway_runtime` if n
 
 ## Roadmap (`sdv_simulation_3`)
 
-Work on **`main`** until pyramid cleanup is ~done; then feature branches (`milestone/actor-*`, etc.).
+**`main`:** pyramid milestone **done** (tag `pyramid-m2-complete`). Further layer work on `main`
+is optional (`sdv_core` split, gateway e2e diagnostics polish).
 
-**Pyramid (in progress on `main`):**
-
-- L1 assembly alphabets (`{Zone}State` / `Message` / `Outcome`) — ADR-5
-- L4 demux; remove `fsm::step` → headlamp inline coupling; **zero module cycles** (TangleGuard)
-- `sdv_core` crate split (L0–L2 boundary)
-- Facade / published paths; gateway e2e via diagnostics where tests allow
-
-**Actor track (after pyramid gate; blog Iteration 3):**
+**Actor track (branches `milestone/actor-*`; blog Iteration 3):**
 
 - Per-zone child actors (headlamp first); parent FSM orchestration; unified diagnostic fan-in (WI-14)
 - Single-writer ledger actor, correlation IDs, diagnostics-as-projection (WI-8–10)

@@ -1,8 +1,7 @@
 //! Front-headlamp zone (L1): alphabet + context + behavior.
 //!
 //! **ADR-5 alphabet:** [`HeadlampState`], [`HeadlampMessage`], [`HeadlampOutcome`].
-//! L4 [`crate::twin_runtime::zone_turn`] dispatches messages; L4
-//! [`crate::twin_runtime::outcome_map`] maps outcomes to [`DomainAction`].
+//! L1 pattern: [`HeadlampContext::on_receiving_message`] → [`HeadlampZoneReply`]; L4 demux maps outcomes.
 
 use std::time::{Duration, Instant};
 
@@ -34,6 +33,17 @@ pub enum HeadlampMessage {
     },
     TimerTick,
     ResetForIgnitionOff,
+}
+
+/// Zone twinlet reply after one [`HeadlampMessage`] — not a full FSM/brain turn (Q5).
+///
+/// `ctx` is the updated zone snapshot; `outcomes` are zone egress for L4 to map. The brain embeds
+/// `ctx` into [`VehicleContext`](crate::vehicle_state::VehicleContext) (phase A); toward phase C
+/// the embed may shrink to whatever the child still sends here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeadlampZoneReply {
+    pub ctx: HeadlampContext,
+    pub outcomes: Vec<HeadlampOutcome>,
 }
 
 /// Zone-local egress — L4 maps to actuation / diagnostics.
@@ -79,8 +89,23 @@ impl Default for HeadlampContext {
 }
 
 impl HeadlampContext {
-    /// Apply one zone message; returns zone outcomes (no L2 types).
-    pub fn apply(
+    /// Pure L1 handler for one zone message — snapshot in, [`HeadlampZoneReply`] out (same pattern
+    /// for other assemblies at this layer). Used by tests, [`HeadlampActor`] body, and local demux.
+    pub fn on_receiving_message(
+        &self,
+        msg: HeadlampMessage,
+        now: Instant,
+    ) -> HeadlampZoneReply {
+        let prev_state = self.state;
+        let mut next = self.clone();
+        let outcomes = next.apply_in_place(msg, prev_state, now);
+        HeadlampZoneReply {
+            ctx: next,
+            outcomes,
+        }
+    }
+
+    fn apply_in_place(
         &mut self,
         msg: HeadlampMessage,
         prev_state: HeadlampState,

@@ -1,7 +1,8 @@
 //! L1 vehicle state: per-zone alphabet (ADR-5), contexts, and [`VehicleContext`].
 //!
 //! Each zone exposes `{Zone}State`, `{Zone}Message`, `{Zone}Outcome` where applicable.
-//! Zones import L0 only — no L2/L4. Consumed by `fsm::step` and held by `DigitalTwinCar`.
+//! **L1 handler pattern:** `{Zone}Context::on_receiving_message(msg, now) -> {Zone}ZoneReply` (headlamp
+//! first). Zones import L0 only — no L2/L4.
 
 pub mod front_headlamp;
 pub mod health;
@@ -10,7 +11,7 @@ pub mod visibility;
 
 pub use front_headlamp::{
     FrontHeadlampIncompleteCause, FrontHeadlampSwitchDirection, HeadlampContext, HeadlampMessage,
-    HeadlampOutcome, HeadlampState,
+    HeadlampOutcome, HeadlampState, HeadlampZoneReply,
 };
 pub use health::{HealthState, VehicleHealthContext};
 pub use powertrain::{

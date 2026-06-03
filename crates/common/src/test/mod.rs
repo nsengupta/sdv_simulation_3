@@ -11,6 +11,9 @@
 mod actor_contract;
 
 #[cfg(test)]
+mod headlamp_reply_contract;
+
+#[cfg(test)]
 mod controller_api_contract;
 
 #[cfg(test)]

@@ -242,5 +242,6 @@ Not required for Phase A. Resolve when breaking cycles and extracting `sdv_core`
 - [x] Delete shims: `engine/context/`, root `virtual_car_actor.rs`, `engine_namespace_contract` (Step 3)
 - [x] Rename `engine/` → `twin_runtime/` (Step 4)
 - [x] Move `transition_map` to `fsm/transition_map.rs`; delete `engine/op_strategy/` and `fsm/engine.rs`
-- [ ] Break all module cycles + extract `sdv_core` (**required** — crate split decided at landing time)
+- [x] Break module cycles in `common` (M2 / TangleGuard clean, 2026-06-03)
+- [ ] Extract `sdv_core` crate (**deferred** — module pyramid sufficient for actor track; tag `pyramid-m2-complete`)
 - [ ] Gateway e2e → pure diagnostic assertions (see Phase B TODO above)
