@@ -20,6 +20,7 @@ use crate::fsm::{
     self, ActorModeHintFromDomain, DomainAction, FrontHeadlampSwitchDirection, FsmEvent, FsmState,
     HeadlampState,
 };
+use crate::twin_runtime::twin_turn;
 use crate::vehicle_state::VehicleContext;
 use crate::published::{PublishedTransitionRecord, SessionEpoch};
 use crate::transition_sink::{TokioMpscTransitionRecordSink, TransitionRecordSink, TransitionSinkError};
@@ -159,8 +160,12 @@ impl Actor for VirtualCarActor {
                         let _ = sink.try_emit(diag_timer_tick(runtime_state.twin_car.identity()));
                     }
                 }
-                let result =
-                    fsm::step(runtime_state.twin_car.current_state(), runtime_state.twin_car.context(), &evt, std::time::Instant::now());
+                let result = twin_turn(
+                    runtime_state.twin_car.current_state(),
+                    runtime_state.twin_car.context(),
+                    &evt,
+                    std::time::Instant::now(),
+                );
                 let old_state = runtime_state.twin_car.current_state().clone();
                 // Capture pre/post headlamp state so a positive ACK that settles
                 // `*Requested → On/Off` can be surfaced on the diagnostic stream (success was

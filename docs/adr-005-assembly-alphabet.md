@@ -118,15 +118,14 @@ Health is **not** a full actuation-style zone like Headlamp.
 
 Health is unlikely to become a heavy child actor unless sensor logic grows materially.
 
-### 7. Known Step 1 debt (accepted until pyramid demux on `sdv_simulation_3`)
+### 7. Known Step 1 debt
 
-- Inline headlamp calls from `fsm::step` with `DomainAction` out-param.
-- TangleGuard: one unique cycle `fsm → vehicle_state → fsm` (reported twice).
-- ~~`LightingState` under `fsm::machineries`~~ — **done (milestone 1):** `HeadlampState` +
-  `{Zone}Message` / `{Zone}Outcome` in `vehicle_state/`; facade exports L1 headlamp state.
+- ~~Inline headlamp calls from `fsm::step` with `DomainAction` out-param~~ — **done (M2):**
+  `twin_runtime::{zone_turn, outcome_map, twin_turn}`; L1 emits [`HeadlampOutcome`] only.
+- ~~TangleGuard: `fsm → vehicle_state → fsm`~~ — **resolved (M2):** `vehicle_state` no longer imports `fsm`.
+- ~~`LightingState` under `fsm::machineries`~~ — **done (M1):** `HeadlampState` in `vehicle_state/`.
 
-**Do not** invest in `HeadlampEffect` → `DomainAction` bridge in this repo; L4 demux
-(milestone 2) supersedes it.
+**Do not** invest in `HeadlampEffect` → `DomainAction` bridge; L4 demux supersedes it.
 
 ---
 

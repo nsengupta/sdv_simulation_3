@@ -1,13 +1,12 @@
 //! Front-headlamp zone (L1): alphabet + context + behavior.
 //!
 //! **ADR-5 alphabet:** [`HeadlampState`], [`HeadlampMessage`], [`HeadlampOutcome`].
-//! Step 1 still applies behavior via a `&mut Vec<DomainAction>` out-param; milestone 2
-//! maps [`HeadlampOutcome`] at L4 and drops the L2 import here.
+//! L4 [`crate::twin_runtime::zone_turn`] dispatches messages; L4
+//! [`crate::twin_runtime::outcome_map`] maps outcomes to [`DomainAction`].
 
 use std::time::{Duration, Instant};
 
 use crate::front_headlamp_log;
-use crate::fsm::DomainAction;
 use crate::vehicle_physics::{
     FRONT_HEADLAMP_OFF_ACK_WAIT, FRONT_HEADLAMP_ON_ACK_WAIT, LUX_OFF_THRESHOLD, LUX_ON_THRESHOLD,
 };
@@ -23,7 +22,7 @@ pub enum HeadlampState {
     OffRequested,
 }
 
-/// Inputs — future child-actor mailbox vocabulary (L4 demux feeds these).
+/// Inputs — L4 demux feeds these (from [`crate::fsm::FsmEvent`] today; `TwinIngress` per ADR-6 later).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlampMessage {
     AmbientLux(u16),
@@ -37,7 +36,7 @@ pub enum HeadlampMessage {
     ResetForIgnitionOff,
 }
 
-/// Zone-local egress — L4 maps to actuation / diagnostics / summarized [`FsmEvent`](crate::fsm::FsmEvent).
+/// Zone-local egress — L4 maps to actuation / diagnostics.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeadlampOutcome {
     RequestOn,
@@ -80,47 +79,63 @@ impl Default for HeadlampContext {
 }
 
 impl HeadlampContext {
-    /// Positive ACK for an ON command: lamp is now on, stop waiting.
-    pub fn apply_on_ack(&mut self) {
+    /// Apply one zone message; returns zone outcomes (no L2 types).
+    pub fn apply(
+        &mut self,
+        msg: HeadlampMessage,
+        prev_state: HeadlampState,
+        now: Instant,
+    ) -> Vec<HeadlampOutcome> {
+        let mut outcomes = Vec::new();
+        match msg {
+            HeadlampMessage::AmbientLux(lux) => {
+                self.evaluate_lux(prev_state, lux, now, &mut outcomes);
+            }
+            HeadlampMessage::AckOn => self.apply_on_ack(),
+            HeadlampMessage::AckOff => self.apply_off_ack(),
+            HeadlampMessage::ActuationIncomplete { direction, cause } => {
+                self.recover_incomplete(direction, cause, &mut outcomes);
+            }
+            HeadlampMessage::TimerTick => self.on_timer_tick(now, &mut outcomes),
+            HeadlampMessage::ResetForIgnitionOff => self.reset_for_ignition_off(),
+        }
+        outcomes
+    }
+
+    fn apply_on_ack(&mut self) {
         self.state = HeadlampState::On;
         self.ack_pending_since = None;
     }
 
-    /// Positive ACK for an OFF command: lamp is now off, stop waiting.
-    pub fn apply_off_ack(&mut self) {
+    fn apply_off_ack(&mut self) {
         self.state = HeadlampState::Off;
         self.ack_pending_since = None;
     }
 
-    /// Lux-driven ON/OFF request when crossing thresholds from a settled state.
-    ///
-    /// `prev_state` is the lighting state *before* this event (Step 1 semantics:
-    /// the request decision is made against the pre-event state).
-    pub fn evaluate_lux(
+    /// Lux-driven ON/OFF when crossing thresholds from a settled state (`prev_state` = pre-event).
+    fn evaluate_lux(
         &mut self,
         prev_state: HeadlampState,
         lux: u16,
         now: Instant,
-        actions: &mut Vec<DomainAction>,
+        outcomes: &mut Vec<HeadlampOutcome>,
     ) {
         match prev_state {
             HeadlampState::Off if lux <= LUX_ON_THRESHOLD => {
                 self.state = HeadlampState::OnRequested;
                 self.ack_pending_since = Some(now);
-                actions.push(DomainAction::RequestFrontHeadlampOn);
+                outcomes.push(HeadlampOutcome::RequestOn);
             }
             HeadlampState::On if lux >= LUX_OFF_THRESHOLD => {
                 self.state = HeadlampState::OffRequested;
                 self.ack_pending_since = Some(now);
-                actions.push(DomainAction::RequestFrontHeadlampOff);
+                outcomes.push(HeadlampOutcome::RequestOff);
             }
             _ => {}
         }
     }
 
-    /// On a heartbeat, if an ACK has been pending past its deadline, recover to a
-    /// safe lighting state and log.
-    pub fn on_timer_tick(&mut self, now: Instant, actions: &mut Vec<DomainAction>) {
+    fn on_timer_tick(&mut self, now: Instant, outcomes: &mut Vec<HeadlampOutcome>) {
         let Some(since) = self.ack_pending_since else {
             return;
         };
@@ -131,7 +146,7 @@ impl HeadlampContext {
                 self.recover_incomplete(
                     FrontHeadlampSwitchDirection::On,
                     FrontHeadlampIncompleteCause::TimedOut,
-                    actions,
+                    outcomes,
                 );
             }
             HeadlampState::OffRequested
@@ -140,25 +155,14 @@ impl HeadlampContext {
                 self.recover_incomplete(
                     FrontHeadlampSwitchDirection::Off,
                     FrontHeadlampIncompleteCause::TimedOut,
-                    actions,
+                    outcomes,
                 );
             }
             _ => {}
         }
     }
 
-    /// Explicit incomplete signal (negative ACK or injected timeout) from ingress.
-    pub fn on_incomplete(
-        &mut self,
-        direction: FrontHeadlampSwitchDirection,
-        cause: FrontHeadlampIncompleteCause,
-        actions: &mut Vec<DomainAction>,
-    ) {
-        self.recover_incomplete(direction, cause, actions);
-    }
-
-    /// Ignition off: clear lighting context to a safe state.
-    pub fn reset_for_ignition_off(&mut self) {
+    fn reset_for_ignition_off(&mut self) {
         self.state = HeadlampState::Off;
         self.ack_pending_since = None;
     }
@@ -167,7 +171,7 @@ impl HeadlampContext {
         &mut self,
         direction: FrontHeadlampSwitchDirection,
         cause: FrontHeadlampIncompleteCause,
-        actions: &mut Vec<DomainAction>,
+        outcomes: &mut Vec<HeadlampOutcome>,
     ) {
         let matches_pending = matches!(
             (self.state, direction),
@@ -183,11 +187,11 @@ impl HeadlampContext {
         match direction {
             FrontHeadlampSwitchDirection::On => {
                 self.state = HeadlampState::Off;
-                actions.push(DomainAction::LogWarning(warning));
+                outcomes.push(HeadlampOutcome::LogWarning(warning));
             }
             FrontHeadlampSwitchDirection::Off => {
                 self.state = HeadlampState::On;
-                actions.push(DomainAction::LogWarning(warning));
+                outcomes.push(HeadlampOutcome::LogWarning(warning));
             }
         }
     }

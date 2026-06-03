@@ -3,7 +3,8 @@
 use proptest::prelude::*;
 use std::time::{Duration, Instant};
 
-use crate::fsm::{step, transition, DomainAction, FsmEvent, FsmState, HeadlampState};
+use crate::fsm::{transition, DomainAction, FsmEvent, FsmState, HeadlampState};
+use crate::twin_runtime::twin_turn;
 use crate::vehicle_state::VehicleContext;
 use crate::vehicle_physics::{LUX_OFF_THRESHOLD, LUX_ON_THRESHOLD};
 
@@ -59,7 +60,7 @@ proptest! {
     ) {
         let mut ctx = VehicleContext::default();
         ctx.headlamp.state = HeadlampState::Off;
-        let result = step(&FsmState::Idle, &ctx, &FsmEvent::UpdateAmbientLux(lux), Instant::now());
+        let result = twin_turn(&FsmState::Idle, &ctx, &FsmEvent::UpdateAmbientLux(lux), Instant::now());
         prop_assert!(!result.actions.contains(&DomainAction::RequestFrontHeadlampOn));
         prop_assert!(!result.actions.contains(&DomainAction::RequestFrontHeadlampOff));
         prop_assert_eq!(result.modified_ctx.headlamp.state, HeadlampState::Off);
@@ -71,7 +72,7 @@ proptest! {
     ) {
         let mut ctx = VehicleContext::default();
         ctx.headlamp.state = HeadlampState::On;
-        let result = step(&FsmState::Driving, &ctx, &FsmEvent::UpdateAmbientLux(lux), Instant::now());
+        let result = twin_turn(&FsmState::Driving, &ctx, &FsmEvent::UpdateAmbientLux(lux), Instant::now());
         prop_assert!(!result.actions.contains(&DomainAction::RequestFrontHeadlampOn));
         prop_assert!(!result.actions.contains(&DomainAction::RequestFrontHeadlampOff));
         prop_assert_eq!(result.modified_ctx.headlamp.state, HeadlampState::On);

@@ -1,7 +1,8 @@
 //! Unit tests for the FSM step contract (`step`).
 
 use crate::digital_twin::{verify_state_laws, DigitalTwinCar, DigitalTwinCarError};
-use crate::fsm::{step, DomainAction, FsmEvent, FsmState};
+use crate::fsm::{DomainAction, FsmEvent, FsmState};
+use crate::twin_runtime::twin_turn;
 use crate::vehicle_state::VehicleContext;
 use crate::vehicle_physics::{
     EXTREME_OPERATION_WARNING_MESSAGE, SPEED_THRESHOLD_WARNING_MESSAGE,
@@ -17,7 +18,7 @@ fn test_step_derive_ctx_and_warning_flow() {
     let mut current_ctx = valid_twin_context();
     let mut current_state = FsmState::Idle;
 
-    let warmup = step(
+    let warmup = twin_turn(
         &current_state,
         &current_ctx,
         &FsmEvent::UpdateRpm(1200),
@@ -29,7 +30,7 @@ fn test_step_derive_ctx_and_warning_flow() {
     current_state = warmup.next_state;
     current_ctx = warmup.modified_ctx;
 
-    let warning = step(
+    let warning = twin_turn(
         &current_state,
         &current_ctx,
         &FsmEvent::UpdateRpm(5600),
@@ -53,7 +54,7 @@ fn test_step_derive_ctx_and_warning_flow() {
 fn test_transition_record_carries_intended_actions_without_enter_mode() {
     // Driving + redline RPM enters ExtremeOperationWarning, which emits StartBuzzer (+
     // warnings) plus an EnterMode hint for the actor.
-    let result = step(
+    let result = twin_turn(
         &FsmState::Driving,
         &valid_twin_context(),
         &FsmEvent::UpdateRpm(5600),
@@ -88,7 +89,7 @@ fn test_step_high_speed_below_rpm_threshold_still_warns_on_speed() {
     let current_ctx = valid_twin_context();
     let current_state = FsmState::Driving;
 
-    let result = step(
+    let result = twin_turn(
         &current_state,
         &current_ctx,
         &FsmEvent::UpdateRpm(3600),
@@ -121,7 +122,7 @@ fn test_step_standard_commute_flow() {
     ];
 
     for (event, expected_state) in sequence {
-        let result = step(car.current_state(), car.context(), &event, Instant::now());
+        let result = twin_turn(car.current_state(), car.context(), &event, Instant::now());
         car.apply_step(result.next_state, result.modified_ctx);
         assert_eq!(*car.current_state(), expected_state, "event={event:?}");
     }
@@ -142,7 +143,7 @@ fn test_state_laws_hold_over_a_legal_journey_and_records_carry_intents() {
         FsmEvent::UpdateRpm(1500),
         FsmEvent::UpdateRpm(5600),
     ] {
-        let result = step(&state, &ctx, &event, Instant::now());
+        let result = twin_turn(&state, &ctx, &event, Instant::now());
 
         // Every cut the journey passes through satisfies the state laws.
         assert!(
@@ -211,7 +212,7 @@ fn test_step_warning_recovery_on_tick_uses_passed_time() {
 
     let warning_state = FsmState::ExtremeOperationWarning(base);
 
-    let early = step(
+    let early = twin_turn(
         &warning_state,
         &ctx,
         &FsmEvent::TimerTick,
@@ -222,7 +223,7 @@ fn test_step_warning_recovery_on_tick_uses_passed_time() {
         FsmState::ExtremeOperationWarning(_)
     ));
 
-    let recovered = step(
+    let recovered = twin_turn(
         &warning_state,
         &ctx,
         &FsmEvent::TimerTick,
