@@ -31,9 +31,9 @@ Turn the **headlamp zone** from in-process `HeadlampContext` + parent `zone_turn
 | **`HeadlampZoneReply`** | Zone twinlet reply after **one** [`HeadlampMessage`] — `{ ctx, outcomes }`. Not a brain/FSM *turn*. |
 | **`HeadlampOutcome`** | Zone egress only (RequestOn, LogWarning, …) — L4 maps to `DomainAction`. |
 | **`HeadlampContext::on_receiving_message`** | L1 pure handler → `HeadlampZoneReply` (pattern for all zones). |
-| **`apply_headlamp_zone`** | Same handler via child RPC ([`HeadlampActorVocabulary`]). |
-| **`HeadlampActorVocabulary`** | RPC envelope for [`apply_headlamp_zone`]. |
-| **`brain_twin_turn`** | Brain-only: RPC(s) then one `twin_turn` with optional zone replies. |
+| **`apply_headlamp_zone`** | **Interim:** **send** (sync `call`). **Replace** with **tell** + twinlet **tell** back. |
+| **`HeadlampActorVocabulary`** | Interim send envelope; becomes tell payload (+ tell-back to brain). |
+| **`brain_twin_turn`** | Interim; remove when tell/reply gate lands. |
 
 Avoid `*Turn` for zone replies — reserved for brain/FSM (`twin_turn`, `brain_twin_turn`).
 
@@ -51,6 +51,33 @@ Avoid `*Turn` for zone replies — reserved for brain/FSM (`twin_turn`, `brain_t
 **A→C bridge:** Brain is *ask child → wait → refresh embed → ledger/diagnostics*. Optional `headlamp_reply` on [`zone_turn`](crates/common/src/twin_runtime/zone_turn.rs) only skips local `on_receiving_message` when the twinlet already handled that message — **temporary** until demux splits.
 
 **L1 pattern (other zones):** `{Zone}Context::on_receiving_message(msg, now) -> {Zone}ZoneReply`.
+
+---
+
+## Brain operational policy (on tell-back — important)
+
+The twin tells the **world** how the **physical sibling** is behaving **right now** (per assembly embed in `HeadlampZoneReply`). The brain applies **operational policy** when that tell-back is merged — not a separate “waiting” `FsmState`.
+
+| Phase | Who | What |
+| ----- | --- | ---- |
+| **While actuation pending** | Assembly | e.g. `OnRequested`, `ack_pending_since` — enough for observers and policy inputs |
+| **Operational mode** | L2 `FsmState` | May stay **unchanged** (e.g. `Driving`) until the **world model** says otherwise |
+| **On tell-back** | Brain | `step` / journey rules read **summated** `VehicleContext` (lux + `headlamp` + speed, …) |
+
+**Example (driving in the dark without a confirmed lamp):**
+
+```text
+Driving + lux low → tell headlamp → OnRequested, CMD sent
+… N seconds, no ACK …
+tell-back: timed out, lamp Off, LogWarning
+brain policy: “driving without lighting is unsafe” → e.g. DrivingDangerously + alarm
+```
+
+- **Not** `FsmState::WaitingForHeadlamp` — assembly data is sufficient while remaining in the current operational state; no extra enum for “mailbox pending.”
+- **Mode change** when the **aggregate** says unsafe (product/L2 rule), at **tell-back apply** time.
+- **Stay** in the new operational state until a **corrective action** clears the condition (e.g. speed lowered, lamp confirmed ON, lux band recovery) — latched world model, not a one-shot log line.
+
+Zone owns **timing and actuation truth**; brain owns **what that means for Driving / Danger / warnings**. Implement rules in L2 `transition_map` or a small journey-policy table beside `FsmState`, fed by embed after tell-back.
 
 ---
 
@@ -83,10 +110,50 @@ Gateway e2e (Phase B) — deferred; will fail if snapshot fields shrink without 
 
 ---
 
+## Gate before more twinlets (next slice — sort this first)
+
+**Vocabulary (author / team):**
+
+| Word | Meaning |
+| ---- | ------- |
+| **Tell** | Fire-and-forget — no one blocked waiting for an answer on that hop. |
+| **Send** | Request with a **receive side waiting** (sync coupling until reply). |
+
+(ractor: **tell** ≈ `cast` / mailbox put without reply port; **send** ≈ `call` + `RpcReplyPort`.)
+
+**Problem today:** [`apply_headlamp_zone`](crates/common/src/twin_runtime/headlamp_actor.rs) is **send** (ractor `call`) — brain `handle` **waits** for the twinlet inside one `Fsm` message. Brain mailbox is single-threaded: ingress and `GetStatus` queue behind that wait.
+
+| Today | Target |
+| ----- | ------ |
+| Brain **sends** to twinlet (waits in `handle`) | Brain **tells** twinlet (fire-and-forget) |
+| Reply in same `handle` stack | Twinlet **tells** brain back (separate brain mailbox message) |
+| One brain message = full turn | Two brain messages: tell out → tell back → then `apply_step` / ledger |
+
+**Target flow (one zone message):**
+
+```text
+Controller → Brain: Fsm(…)
+Brain:      tell HeadlampActor { msg, turn_id }   // no receive side waiting; mailbox free
+…           GetStatus / other Fsm may run …
+Headlamp:   on_receiving_message → tell Brain: ZoneReady { turn_id, HeadlampZoneReply }
+Brain:      merge reply → apply_step → ledger → actuation / diagnostics
+```
+
+**Still brain-owned:** `apply_step`, ledger, `record_seq`, `diag_front_headlamp_confirmed`, actuation egress — not in the twinlet.
+
+**Still one apply per message** in the twinlet; only **coupling** changes (no RPC hold on brain mailbox).
+
+**Do not add** powertrain / visibility / health twinlets until this gate is done on headlamp (replace `brain_twin_turn` / `apply_headlamp_zone` `call` path). Then copy the tell/reply pattern.
+
+**Open design (when implementing):** `turn_id` / correlation for out-of-order replies; whether controller `Fsm` waits for brain completion or brain buffers pending ingress (ADR-6 M4).
+
+---
+
 ## In scope / out of scope
 
-**In:** headlamp actor, brain dispatch, embed from `HeadlampZoneReply`, tests, README when structure changes.  
-**Out:** other zone actors, ADR-6 power barrier, `TwinIngress` on controller, `sdv_core` split, actuation child.
+**In (this branch):** headlamp actor, sync RPC brain dispatch, embed from `HeadlampZoneReply`, tests, README.  
+**Next slice:** tell/reply gate above.  
+**Out:** other zone actors (until gate), ADR-6 power barrier, `TwinIngress` on controller, `sdv_core` split, actuation child.
 
 ---
 
@@ -129,7 +196,9 @@ Child → HeadlampZoneReply → brain → actuation / diagnostics / apply_step
 | 2 `HeadlampActor` | done | `apply_headlamp_zone` / vocabulary struct |
 | 3 Brain dispatch | done | `brain_twin_turn` |
 | 4 Ledger/reply tests | done | `headlamp_reply_contract.rs` |
-| 5 README | pending | Structural change |
+| 5 README | done | `e18fd35` — first zone actorification slice |
+| 6 Tell / tell-back (no send/wait) | **next** | Gate before other twinlets |
+| 7 Operational policy on tell-back | after 6 | e.g. DrivingDangerously until corrective action |
 
 ---
 
