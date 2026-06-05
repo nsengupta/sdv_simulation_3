@@ -65,6 +65,12 @@ Three roles, one constitution:
 
 **First application (2026-06-01):** `RPM_DRIVING_THRESHOLD` in `vehicle_constants` — used by `transition_map` (Idle→Driving) and `law_rpm_above_threshold_holds`.
 
+**ADR-7 detectors (deferred target, 2026-06-04):** operational detectors synthesize
+`FsmEvent::Internal` from exit cuts; they should live **in or beside L2** (`fsm/`), with
+**per-state slots** in the transition table (default no-op), and consult **`vehicle_physics`**
+for thresholds and derived predicates — same constitution as L2 enforce. Step 7a interim:
+`twin_runtime/detectors/` hook only. See [`adr-007-fsm-quiescence-and-cut.md`](adr-007-fsm-quiescence-and-cut.md) § deferred.
+
 ---
 
 ## Important TODO — table-driven law catalog

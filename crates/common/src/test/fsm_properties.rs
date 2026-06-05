@@ -47,6 +47,7 @@ fn arb_fsm_state() -> impl Strategy<Value = FsmState> {
         Just(FsmState::Off),
         Just(FsmState::Idle),
         Just(FsmState::Driving),
+        Just(FsmState::DrivingDangerously),
         any::<u64>().prop_map(|n| {
             FsmState::ExtremeOperationWarning(Instant::now() - Duration::from_nanos(1 + (n % 1_000_000_000)))
         }),

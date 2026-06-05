@@ -1,6 +1,11 @@
 //! L0 foundation: vehicle calibration constants and pure kinematic formulas.
 //!
 //! Depends on std only. No FSM, runtime, or I/O types.
+//!
+//! **Consumers (one constitution):** L2 [`transition_map`], L3 state laws, L1 zone handlers
+//! (e.g. headlamp lux bands), and **operational detectors** (ADR-7 — lighting today; kinematic
+//! and other internal-event detectors tomorrow). New detectors must reuse predicates and thresholds
+//! from this module rather than duplicating physics locally.
 
 pub mod constants;
 pub mod kinematics;

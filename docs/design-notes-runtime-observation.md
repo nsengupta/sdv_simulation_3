@@ -667,8 +667,9 @@ Decision trail (the "why"):
   reading a captured file, using the twin's public types + `verify_state_laws`. Baking the
   fold into the library was over-engineering (ADR-1 superseded). The pure laws are an
   **oracle** (tests / CI / offline / async-sampled), never a PROD hot-path gate.
-- **Cut semantics (retained as guidance for the external verifier, ADR-2).** A *cut* is one
-  `(state, ctx)` snapshot; each record spans an **entry** `(old_state, old_ctx)` and **exit**
+- **Cut semantics (retained as guidance for the external verifier, ADR-2).** Canonical glossary:
+  [`adr-007-fsm-quiescence-and-cut.md`](adr-007-fsm-quiescence-and-cut.md). A *cut* is one
+  `(FsmState, VehicleContext)` snapshot; each record spans an **entry** `(old_state, old_ctx)` and **exit**
   `(next_state, current_ctx)`. A verifier folds `verify_state_laws` over each cut and should
   **verify** the starting cut `s0` rather than assume it (totality over partial / replayed /
   windowed streams). The laws are **node** invariants, not **edge**/transition-legality.

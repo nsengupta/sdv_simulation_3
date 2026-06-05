@@ -58,7 +58,10 @@ pub fn step(
         }
     }
 
-    if matches!(next_state, FsmState::ExtremeOperationWarning(_)) {
+    if matches!(
+        next_state,
+        FsmState::ExtremeOperationWarning(_) | FsmState::DrivingDangerously
+    ) {
         actions.push(DomainAction::EnterMode(ActorModeHintFromDomain::Transitioning));
     } else {
         actions.push(DomainAction::EnterMode(ActorModeHintFromDomain::Normal));

@@ -112,6 +112,19 @@ impl From<&FrontHeadlampIncompleteCause> for PublishedFrontHeadlampIncompleteCau
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublishedOperational {
+    LightingUnsafe,
+}
+
+impl From<&crate::fsm::Operational> for PublishedOperational {
+    fn from(op: &crate::fsm::Operational) -> Self {
+        match op {
+            crate::fsm::Operational::LightingUnsafe => Self::LightingUnsafe,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PublishedFsmEvent {
     PowerOn,
@@ -125,6 +138,7 @@ pub enum PublishedFsmEvent {
         cause: PublishedFrontHeadlampIncompleteCause,
     },
     TimerTick,
+    Internal(PublishedOperational),
 }
 
 impl From<&FsmEvent> for PublishedFsmEvent {
@@ -143,6 +157,7 @@ impl From<&FsmEvent> for PublishedFsmEvent {
                 }
             }
             FsmEvent::TimerTick => Self::TimerTick,
+            FsmEvent::Internal(op) => Self::Internal(op.into()),
         }
     }
 }
@@ -180,6 +195,7 @@ pub enum PublishedFsmState {
     Off,
     Idle,
     Driving,
+    DrivingDangerously,
     /// The monotonic warning anchor projected to wall-clock placement.
     ExtremeOperationWarning {
         began_at_unix: Duration,
@@ -289,6 +305,7 @@ impl SessionEpoch {
             FsmState::Off => PublishedFsmState::Off,
             FsmState::Idle => PublishedFsmState::Idle,
             FsmState::Driving => PublishedFsmState::Driving,
+            FsmState::DrivingDangerously => PublishedFsmState::DrivingDangerously,
             FsmState::ExtremeOperationWarning(at) => PublishedFsmState::ExtremeOperationWarning {
                 began_at_unix: self.project(*at),
             },

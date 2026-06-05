@@ -13,8 +13,16 @@ pub enum FsmState {
     Off,
     Idle,
     Driving,
+    /// Driving in the dark without confirmed lighting (step 7 operational policy).
+    DrivingDangerously,
     /// Speed > 160 km/h and RPM > 5500 sustained (see [`crate::vehicle_physics`]).
     ExtremeOperationWarning(Instant),
+}
+
+/// Brain-synthesized facts (detectors). Ledger-visible; not assembly / wire ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operational {
+    LightingUnsafe,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +38,8 @@ pub enum FsmEvent {
         cause: FrontHeadlampIncompleteCause,
     },
     TimerTick,
+    /// Brain-only hop (ADR-7): no `zone_turn`; table sets mode.
+    Internal(Operational),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +74,7 @@ impl From<&FsmState> for VehicleState {
             FsmState::Off => VehicleState::Off,
             FsmState::Idle => VehicleState::Idle,
             FsmState::Driving => VehicleState::Driving,
+            FsmState::DrivingDangerously => VehicleState::Critical,
             FsmState::ExtremeOperationWarning(_) => VehicleState::ExtremeOperationWarning,
         }
     }

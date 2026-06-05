@@ -40,7 +40,7 @@ Layer map: [`docs/design-notes-pyramid-layers.md`](docs/design-notes-pyramid-lay
 **Active next (actor track, branch off tagged `main`):** per-zone child actors and ADR-6 brain
 features — blog **Iteration 3**; start from `milestone/actor-headlamp` (or similar).
 
-**ADR series:** `docs/adr-005-*.md` (L1 alphabets) → `docs/adr-006-*.md` (target brain & ingress).
+**ADR series:** `docs/adr-005-*.md` (L1 alphabets) → `docs/adr-006-*.md` (brain & ingress) → [`docs/adr-007-fsm-quiescence-and-cut.md`](docs/adr-007-fsm-quiescence-and-cut.md) (**cut**, internal FSM events, quiescence at commit).
 
 **Not in scope yet:** full actorification; offline file-writer + folding verifier (designed, unbuilt).
 

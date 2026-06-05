@@ -5,7 +5,8 @@
 //! The individual laws are pure predicates on `(&FsmState, &VehicleContext)`, gathered into
 //! [`STATE_LAWS`], a named catalog, and exposed through the pure public entry point
 //! [`verify_state_laws`]. These are the **building blocks**: an external/offline verifier (or
-//! a test) reconstructs each `(state, ctx)` cut from a captured `PublishedTransitionRecord`
+//! a test) reconstructs each **cut** `(FsmState, VehicleContext)` from a captured
+//! `PublishedTransitionRecord` — see `docs/adr-007-fsm-quiescence-and-cut.md`.
 //! stream and folds `verify_state_laws` over it. The library deliberately does **not** ship a
 //! journey-fold helper — that consumer-side concern lives outside the twin. The pure laws are
 //! an *oracle* (tests / CI / offline / async-sampled), never a PROD hot-path gate; invariants

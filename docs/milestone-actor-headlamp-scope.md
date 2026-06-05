@@ -54,15 +54,11 @@ Avoid `*Turn` for zone replies — reserved for brain/FSM (`twin_turn`, `brain_t
 
 ---
 
-## Brain operational policy (on tell-back — important)
+## Brain operational policy (step 7 — see ADR-7)
 
-The twin tells the **world** how the **physical sibling** is behaving **right now** (per assembly embed in `HeadlampZoneReply`). The brain applies **operational policy** when that tell-back is merged — not a separate “waiting” `FsmState`.
+**Canonical design:** [`adr-007-fsm-quiescence-and-cut.md`](adr-007-fsm-quiescence-and-cut.md) — **cut**, `run_to_quiescence`, `FsmEvent::Internal(Operational::…)`, table-only `next_state`.
 
-| Phase | Who | What |
-| ----- | --- | ---- |
-| **While actuation pending** | Assembly | e.g. `OnRequested`, `ack_pending_since` — enough for observers and policy inputs |
-| **Operational mode** | L2 `FsmState` | May stay **unchanged** (e.g. `Driving`) until the **world model** says otherwise |
-| **On tell-back** | Brain | `step` / journey rules read **summated** `VehicleContext` (lux + `headlamp` + speed, …) |
+The twin tells the **world** how the **physical sibling** is behaving **right now** (assembly embed in `HeadlampZoneReply`). After tell-back merge, the brain runs **`run_to_quiescence`** (always at commit). **Detectors** read the **exit cut** after each hop; they may enqueue internal events; **`transition_map`** alone changes mode.
 
 **Example (driving in the dark without a confirmed lamp):**
 
@@ -70,14 +66,13 @@ The twin tells the **world** how the **physical sibling** is behaving **right no
 Driving + lux low → tell headlamp → OnRequested, CMD sent
 … N seconds, no ACK …
 tell-back: timed out, lamp Off, LogWarning
-brain policy: “driving without lighting is unsafe” → e.g. DrivingDangerously + alarm
+hop 1: external TimerTick → cut still Driving
+detector → Internal(Operational::LightingUnsafe)
+hop 2: table → DrivingDangerously + StartBuzzer (ledger row for Internal)
 ```
 
-- **Not** `FsmState::WaitingForHeadlamp` — assembly data is sufficient while remaining in the current operational state; no extra enum for “mailbox pending.”
-- **Mode change** when the **aggregate** says unsafe (product/L2 rule), at **tell-back apply** time.
-- **Stay** in the new operational state until a **corrective action** clears the condition (e.g. speed lowered, lamp confirmed ON, lux band recovery) — latched world model, not a one-shot log line.
-
-Zone owns **timing and actuation truth**; brain owns **what that means for Driving / Danger / warnings**. Implement rules in L2 `transition_map` or a small journey-policy table beside `FsmState`, fed by embed after tell-back.
+- **Not** `FsmState::WaitingForHeadlamp`; **not** override of `next_state` after `step`.
+- Zone owns actuation truth; brain owns detectors + FSM table rows for internal events.
 
 ---
 
@@ -205,7 +200,7 @@ Brain → tell HeadlampActor → HeadlampZoneReady → commit_brain_turn → app
 | 4 Ledger/reply tests | done | `headlamp_reply_contract.rs` |
 | 5 README | done | `e18fd35` — first zone actorification slice |
 | 6 Tell / tell-back (no send/wait) | done | `tell_headlamp_zone`, `HeadlampZoneReady`, backlog |
-| 7 Operational policy on tell-back | after 6 | e.g. DrivingDangerously until corrective action |
+| 7 Operational policy on tell-back | **TDD** | ADR-7 confirmations; **add red tests first** (one-by-one), then `run_to_quiescence` + impl |
 
 ---
 

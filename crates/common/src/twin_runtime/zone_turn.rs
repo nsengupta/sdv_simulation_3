@@ -28,7 +28,10 @@ pub(crate) fn fsm_event_headlamp_message(event: &FsmEvent) -> Option<HeadlampMes
             })
         }
         FsmEvent::TimerTick => Some(HeadlampMessage::TimerTick),
-        FsmEvent::UpdateRpm(_) | FsmEvent::PowerOn | FsmEvent::PowerOff => None,
+        FsmEvent::UpdateRpm(_)
+        | FsmEvent::PowerOn
+        | FsmEvent::PowerOff
+        | FsmEvent::Internal(_) => None,
     }
 }
 
@@ -95,7 +98,7 @@ pub fn zone_turn(
             next.headlamp = zone_reply.ctx;
             headlamp_outcomes.extend(zone_reply.outcomes);
         }
-        FsmEvent::PowerOn | FsmEvent::PowerOff => {}
+        FsmEvent::PowerOn | FsmEvent::PowerOff | FsmEvent::Internal(_) => {}
     }
 
     ZoneTurnResult {

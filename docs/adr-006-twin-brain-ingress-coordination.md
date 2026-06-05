@@ -3,7 +3,7 @@
 **Status:** `ACCEPTED` (target architecture; implementation phased)  
 **Date:** 2026-06-03  
 **Series:** Architecture decision records — follows [`adr-005-assembly-alphabet.md`](adr-005-assembly-alphabet.md)  
-**Related:** [`design-notes-pyramid-layers.md`](design-notes-pyramid-layers.md), [`design-notes-runtime-observation.md`](design-notes-runtime-observation.md)
+**Related:** [`design-notes-pyramid-layers.md`](design-notes-pyramid-layers.md), [`design-notes-runtime-observation.md`](design-notes-runtime-observation.md), [`adr-007-fsm-quiescence-and-cut.md`](adr-007-fsm-quiescence-and-cut.md) (cuts, internal events, quiescence runner)
 
 **Audience:** README / blog source material; agent context for TODOs on `sdv_simulation_3`.
 

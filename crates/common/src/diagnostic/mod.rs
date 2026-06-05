@@ -146,6 +146,10 @@ pub fn diag_state_transition(
                 format!(", speed = {speed} km/h, RPM = {rpm} ({safety})"),
             )
         }
+        FsmState::DrivingDangerously => (
+            "DrivingDangerously",
+            format!(", speed = {speed} km/h, RPM = {rpm}, lighting unsafe"),
+        ),
         FsmState::ExtremeOperationWarning(_) => {
             let cause = if extreme_operation_active(rpm, speed) {
                 "speed & RPM both extreme"

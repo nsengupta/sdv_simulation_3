@@ -1,0 +1,26 @@
+//! Operational detectors (ADR-7): read exit cut → optional `FsmEvent::Internal`.
+//!
+//! **Interim location (L4 hook):** catalog lives under `twin_runtime` for step 7a only.
+//! **Target home:** `fsm/detectors/` or L2 sibling — detectors reference [`FsmState`] and
+//! synthesize [`FsmEvent::Internal`]; they belong beside [`transition_map`], not in runtime
+//! orchestration. See ADR-7 § deferred (placement + table slots).
+//!
+//! **Physics:** every detector (lighting now; kinematic and others later) imports predicates and
+//! thresholds from [`crate::vehicle_physics`] only — same constitution as `transition_map` and
+//! L3 laws. New physical rules start in L0, then flow to enforce + detect paths.
+//!
+//! [`detect_internal_after_hop`] is the quiescence entry point (L4 calls L2 rules here).
+//! **Revisit:** per-state detector `fn` pointer in `transition_map` (default no-op) so latched
+//! modes never run unrelated catalog entries — ADR-7 § deferred A.
+
+mod lighting_unsafe;
+
+pub use lighting_unsafe::lighting_unsafe_detector;
+
+/// Run registered detectors against the hop exit cut; first match wins.
+pub fn detect_internal_after_hop(
+    exit_state: &crate::fsm::FsmState,
+    exit_ctx: &crate::vehicle_state::VehicleContext,
+) -> Option<crate::fsm::FsmEvent> {
+    lighting_unsafe_detector(exit_state, exit_ctx)
+}
