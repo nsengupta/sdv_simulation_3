@@ -80,6 +80,7 @@ pub async fn run(launch: GatewayLaunchConfig<'_>) -> Result<()> {
         actuation_command_tx: Some(actuation_cmd_tx),
         diagnostic_tx: Some(diag_tx),
         transition_tx,
+        ..VehicleControllerRuntimeOptions::default()
     };
 
     let (controller, _join) = VehicleController::install_and_start_with_options(

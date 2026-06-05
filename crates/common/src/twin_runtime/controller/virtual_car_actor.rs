@@ -7,13 +7,15 @@
 //!   request/reply such as [`DigitalTwinCarVocabulary::GetStatus`] ([`RpcReplyPort`]).
 
 use async_trait::async_trait;
-use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use ractor::concurrency::{Duration as RactorDuration, JoinHandle};
+use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::diagnostic::{DiagnosticMessage, DiagnosticSink, TokioMpscDiagnosticSink, diag_front_headlamp_confirmed, diag_state_transition, diag_timer_tick, diag_actuation_failure, diag_warning, diag_transition_sink_full, diag_transition_sink_closed};
 use crate::digital_twin::{CarSnapshot, DigitalTwinCar, DigitalTwinCarVocabulary};
+use crate::twin_runtime::constants::ZONE_TELL_BACK_WAIT;
 use crate::twin_runtime::controller::actuation_manager::{
     ActuationManager, DefaultActuationManager,
 };
@@ -22,12 +24,15 @@ use crate::fsm::{
     self, ActorModeHintFromDomain, DomainAction, FrontHeadlampSwitchDirection, FsmEvent, FsmState,
     HeadlampState, StepResult,
 };
-use crate::twin_runtime::headlamp_actor::{tell_headlamp_zone, HeadlampActor, HeadlampActorVocabulary};
+use crate::twin_runtime::headlamp_actor::{tell_headlamp_zone, HeadlampActor, HeadlampActorState, HeadlampActorVocabulary};
 use crate::twin_runtime::twin_turn::{commit_brain_turn, fsm_step_lands_off};
+use crate::twin_runtime::zone_tell_back::{on_tell_back_timeout, TellBackTimeoutOutcome, TellBackWait};
 use crate::twin_runtime::zone_turn::fsm_event_headlamp_message;
 use crate::vehicle_state::{HeadlampMessage, HeadlampZoneReply, VehicleContext};
 use crate::published::{PublishedTransitionRecord, SessionEpoch};
 use crate::transition_sink::{TokioMpscTransitionRecordSink, TransitionRecordSink, TransitionSinkError};
+
+type TellBackTimer = JoinHandle<Result<(), MessagingErr<DigitalTwinCarVocabulary>>>;
 
 /// The Digital Twin Actor
 pub struct VirtualCarActor;
@@ -53,18 +58,21 @@ impl From<&str> for VirtualCarActorArgs {
     }
 }
 
-/// One FSM event awaiting headlamp tell-back(s) before [`commit_brain_turn`].
-#[derive(Debug, Clone)]
+/// One FSM event awaiting headlamp tell-back(s) before commit.
+#[derive(Debug)]
 enum PendingBrainTurn {
     /// Event's primary zone message was told; waiting for embed.
     PrimaryHeadlamp {
-        turn_id: u64,
+        wait: TellBackWait,
+        timer: Option<TellBackTimer>,
         event: FsmEvent,
         now: Instant,
+        message: HeadlampMessage,
     },
     /// Primary embed received (or skipped); waiting for ignition-off reset tell-back.
     IgnitionOffReset {
-        turn_id: u64,
+        wait: TellBackWait,
+        timer: Option<TellBackTimer>,
         event: FsmEvent,
         now: Instant,
         headlamp_reply: Option<HeadlampZoneReply>,
@@ -160,8 +168,11 @@ impl Actor for VirtualCarActor {
             };
 
         let initial_ctx = VehicleContext::default();
-        let (headlamp_actor, _) =
-            ractor::spawn::<HeadlampActor>(initial_ctx.headlamp.clone()).await?;
+        let (headlamp_actor, _) = ractor::spawn::<HeadlampActor>(HeadlampActorState {
+            ctx: initial_ctx.headlamp.clone(),
+            silent: args.runtime_options.test_silent_headlamp,
+        })
+        .await?;
 
         Ok(VirtualCarRuntimeState {
             twin_car: DigitalTwinCar::new(identity, FsmState::Off, initial_ctx)?,
@@ -184,7 +195,7 @@ impl Actor for VirtualCarActor {
         message: Self::Msg,
         runtime_state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use DigitalTwinCarVocabulary::{Fsm, GetStatus, HeadlampZoneReady};
+        use DigitalTwinCarVocabulary::{Fsm, GetStatus, HeadlampZoneReady, TellBackTimeout};
 
         match message {
             Fsm(evt) => {
@@ -202,8 +213,26 @@ impl Actor for VirtualCarActor {
                 Self::begin_fsm_turn(&myself, runtime_state, evt, now).await?;
                 Self::pump_fsm_backlog(&myself, runtime_state).await
             }
-            HeadlampZoneReady { turn_id, reply } => {
-                Self::on_headlamp_zone_ready(&myself, runtime_state, turn_id, reply).await?;
+            HeadlampZoneReady {
+                turn_id,
+                tell_attempt,
+                reply,
+            } => {
+                Self::on_headlamp_zone_ready(
+                    &myself,
+                    runtime_state,
+                    turn_id,
+                    tell_attempt,
+                    reply,
+                )
+                .await?;
+                Self::pump_fsm_backlog(&myself, runtime_state).await
+            }
+            TellBackTimeout {
+                turn_id,
+                tell_attempt,
+            } => {
+                Self::on_tell_back_timeout(&myself, runtime_state, turn_id, tell_attempt).await?;
                 Self::pump_fsm_backlog(&myself, runtime_state).await
             }
             GetStatus(reply) => Self::reply_get_status(
@@ -220,6 +249,9 @@ impl Actor for VirtualCarActor {
         _myself: ActorRef<Self::Msg>,
         runtime_state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        if let Some(pending) = runtime_state.pending_turn.take() {
+            Self::abort_pending_timer(pending);
+        }
         // Interim: brain stops the headlamp twinlet here. Target: assembly actors stop before
         // the brain (supervisor-ordered teardown), not brain-owned child stop — see milestone doc.
         runtime_state.headlamp_actor.stop(None);
@@ -228,6 +260,78 @@ impl Actor for VirtualCarActor {
 }
 
 impl VirtualCarActor {
+    fn abort_pending_timer(pending: PendingBrainTurn) {
+        match pending {
+            PendingBrainTurn::PrimaryHeadlamp { mut timer, .. }
+            | PendingBrainTurn::IgnitionOffReset { mut timer, .. } => {
+                Self::abort_tell_back_timer(&mut timer);
+            }
+        }
+    }
+
+    fn abort_tell_back_timer(timer: &mut Option<TellBackTimer>) {
+        if let Some(handle) = timer.take() {
+            handle.abort();
+        }
+    }
+
+    fn arm_tell_back_timer(
+        brain: &ActorRef<DigitalTwinCarVocabulary>,
+        wait: TellBackWait,
+        timer: &mut Option<TellBackTimer>,
+    ) {
+        Self::abort_tell_back_timer(timer);
+        let turn_id = wait.turn_id;
+        let tell_attempt = wait.tell_attempt;
+        *timer = Some(brain.send_after(
+            RactorDuration::from(ZONE_TELL_BACK_WAIT),
+            move || DigitalTwinCarVocabulary::TellBackTimeout {
+                turn_id,
+                tell_attempt,
+            },
+        ));
+    }
+
+    async fn begin_headlamp_wait(
+        brain: &ActorRef<DigitalTwinCarVocabulary>,
+        runtime_state: &mut VirtualCarRuntimeState,
+        turn_id: u64,
+        message: HeadlampMessage,
+        event: FsmEvent,
+        now: Instant,
+        headlamp_reply: Option<HeadlampZoneReply>,
+    ) -> Result<(), ActorProcessingErr> {
+        let wait = TellBackWait::new(turn_id);
+        tell_headlamp_zone(
+            &runtime_state.headlamp_actor,
+            brain,
+            turn_id,
+            wait.tell_attempt,
+            message,
+            now,
+        )?;
+        let mut timer = None;
+        Self::arm_tell_back_timer(brain, wait, &mut timer);
+        runtime_state.pending_turn = Some(if message == HeadlampMessage::ResetForIgnitionOff {
+            PendingBrainTurn::IgnitionOffReset {
+                wait,
+                timer,
+                event,
+                now,
+                headlamp_reply,
+            }
+        } else {
+            PendingBrainTurn::PrimaryHeadlamp {
+                wait,
+                timer,
+                event,
+                now,
+                message,
+            }
+        });
+        Ok(())
+    }
+
     async fn begin_fsm_turn(
         brain: &ActorRef<DigitalTwinCarVocabulary>,
         runtime_state: &mut VirtualCarRuntimeState,
@@ -238,19 +342,16 @@ impl VirtualCarActor {
         runtime_state.next_turn_id = runtime_state.next_turn_id.saturating_add(1);
 
         if let Some(message) = fsm_event_headlamp_message(&event) {
-            tell_headlamp_zone(
-                &runtime_state.headlamp_actor,
-                &brain,
+            return Self::begin_headlamp_wait(
+                brain,
+                runtime_state,
                 turn_id,
                 message,
-                now,
-            )?;
-            runtime_state.pending_turn = Some(PendingBrainTurn::PrimaryHeadlamp {
-                turn_id,
                 event,
                 now,
-            });
-            return Ok(());
+                None,
+            )
+            .await;
         }
 
         if fsm_step_lands_off(
@@ -260,20 +361,16 @@ impl VirtualCarActor {
             now,
             None,
         ) {
-            tell_headlamp_zone(
-                &runtime_state.headlamp_actor,
-                &brain,
+            return Self::begin_headlamp_wait(
+                brain,
+                runtime_state,
                 turn_id,
                 HeadlampMessage::ResetForIgnitionOff,
-                now,
-            )?;
-            runtime_state.pending_turn = Some(PendingBrainTurn::IgnitionOffReset {
-                turn_id,
                 event,
                 now,
-                headlamp_reply: None,
-            });
-            return Ok(());
+                None,
+            )
+            .await;
         }
 
         let result = commit_brain_turn(
@@ -291,6 +388,7 @@ impl VirtualCarActor {
         brain: &ActorRef<DigitalTwinCarVocabulary>,
         runtime_state: &mut VirtualCarRuntimeState,
         turn_id: u64,
+        tell_attempt: u32,
         reply: HeadlampZoneReply,
     ) -> Result<(), ActorProcessingErr> {
         let Some(pending) = runtime_state.pending_turn.take() else {
@@ -299,10 +397,13 @@ impl VirtualCarActor {
 
         match pending {
             PendingBrainTurn::PrimaryHeadlamp {
-                turn_id: expected,
+                wait,
+                mut timer,
                 event,
                 now,
-            } if expected == turn_id => {
+                message: _,
+            } if wait.matches(turn_id, tell_attempt) => {
+                Self::abort_tell_back_timer(&mut timer);
                 if fsm_step_lands_off(
                     runtime_state.twin_car.current_state(),
                     runtime_state.twin_car.context(),
@@ -310,20 +411,16 @@ impl VirtualCarActor {
                     now,
                     Some(&reply),
                 ) {
-                    tell_headlamp_zone(
-                        &runtime_state.headlamp_actor,
-                        &brain,
+                    return Self::begin_headlamp_wait(
+                        brain,
+                        runtime_state,
                         turn_id,
                         HeadlampMessage::ResetForIgnitionOff,
-                        now,
-                    )?;
-                    runtime_state.pending_turn = Some(PendingBrainTurn::IgnitionOffReset {
-                        turn_id,
                         event,
                         now,
-                        headlamp_reply: Some(reply),
-                    });
-                    return Ok(());
+                        Some(reply),
+                    )
+                    .await;
                 }
                 let result = commit_brain_turn(
                     runtime_state.twin_car.current_state(),
@@ -336,11 +433,13 @@ impl VirtualCarActor {
                 Self::apply_committed_turn(runtime_state, &event, result).await?;
             }
             PendingBrainTurn::IgnitionOffReset {
-                turn_id: expected,
+                wait,
+                mut timer,
                 event,
                 now,
                 headlamp_reply,
-            } if expected == turn_id => {
+            } if wait.matches(turn_id, tell_attempt) => {
+                Self::abort_tell_back_timer(&mut timer);
                 let result = commit_brain_turn(
                     runtime_state.twin_car.current_state(),
                     runtime_state.twin_car.context(),
@@ -350,6 +449,111 @@ impl VirtualCarActor {
                     Some(reply),
                 );
                 Self::apply_committed_turn(runtime_state, &event, result).await?;
+            }
+            other => {
+                runtime_state.pending_turn = Some(other);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn on_tell_back_timeout(
+        brain: &ActorRef<DigitalTwinCarVocabulary>,
+        runtime_state: &mut VirtualCarRuntimeState,
+        turn_id: u64,
+        tell_attempt: u32,
+    ) -> Result<(), ActorProcessingErr> {
+        let Some(pending) = runtime_state.pending_turn.take() else {
+            return Ok(());
+        };
+
+        match pending {
+            PendingBrainTurn::PrimaryHeadlamp {
+                wait,
+                mut timer,
+                event,
+                now,
+                message,
+            } if wait.matches(turn_id, tell_attempt) => {
+                Self::abort_tell_back_timer(&mut timer);
+                match on_tell_back_timeout(
+                    &runtime_state.twin_car.context().headlamp,
+                    wait,
+                ) {
+                    TellBackTimeoutOutcome::Retry(next) => {
+                        tell_headlamp_zone(
+                            &runtime_state.headlamp_actor,
+                            brain,
+                            turn_id,
+                            next.tell_attempt,
+                            message,
+                            now,
+                        )?;
+                        Self::arm_tell_back_timer(brain, next, &mut timer);
+                        runtime_state.pending_turn = Some(PendingBrainTurn::PrimaryHeadlamp {
+                            wait: next,
+                            timer,
+                            event,
+                            now,
+                            message,
+                        });
+                    }
+                    TellBackTimeoutOutcome::Exhausted(reply) => {
+                        let result = commit_brain_turn(
+                            runtime_state.twin_car.current_state(),
+                            runtime_state.twin_car.context(),
+                            &event,
+                            now,
+                            Some(reply),
+                            None,
+                        );
+                        Self::apply_committed_turn(runtime_state, &event, result).await?;
+                    }
+                }
+            }
+            PendingBrainTurn::IgnitionOffReset {
+                wait,
+                mut timer,
+                event,
+                now,
+                headlamp_reply,
+            } if wait.matches(turn_id, tell_attempt) => {
+                Self::abort_tell_back_timer(&mut timer);
+                match on_tell_back_timeout(
+                    &runtime_state.twin_car.context().headlamp,
+                    wait,
+                ) {
+                    TellBackTimeoutOutcome::Retry(next) => {
+                        tell_headlamp_zone(
+                            &runtime_state.headlamp_actor,
+                            brain,
+                            turn_id,
+                            next.tell_attempt,
+                            HeadlampMessage::ResetForIgnitionOff,
+                            now,
+                        )?;
+                        Self::arm_tell_back_timer(brain, next, &mut timer);
+                        runtime_state.pending_turn = Some(PendingBrainTurn::IgnitionOffReset {
+                            wait: next,
+                            timer,
+                            event,
+                            now,
+                            headlamp_reply,
+                        });
+                    }
+                    TellBackTimeoutOutcome::Exhausted(reply) => {
+                        let result = commit_brain_turn(
+                            runtime_state.twin_car.current_state(),
+                            runtime_state.twin_car.context(),
+                            &event,
+                            now,
+                            headlamp_reply,
+                            Some(reply),
+                        );
+                        Self::apply_committed_turn(runtime_state, &event, result).await?;
+                    }
+                }
             }
             other => {
                 runtime_state.pending_turn = Some(other);

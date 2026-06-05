@@ -1,9 +1,11 @@
 pub mod connectors;
+pub mod constants;
 pub mod controller;
 pub mod detectors;
 pub mod headlamp_actor;
 pub mod outcome_map;
 pub mod twin_turn;
+pub mod zone_tell_back;
 pub mod zone_turn;
 
 pub use headlamp_actor::{tell_headlamp_zone, HeadlampActor, HeadlampActorVocabulary};

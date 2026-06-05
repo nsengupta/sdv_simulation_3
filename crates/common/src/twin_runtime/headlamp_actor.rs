@@ -14,7 +14,16 @@ pub struct HeadlampActorVocabulary {
     pub message: HeadlampMessage,
     pub now: Instant,
     pub turn_id: u64,
+    /// Matches brain tell-back wait attempt (retries use incrementing ids).
+    pub tell_attempt: u32,
     pub brain: ActorRef<DigitalTwinCarVocabulary>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeadlampActorState {
+    pub ctx: HeadlampContext,
+    /// When true, swallow tells without tell-back (contract tests only).
+    pub silent: bool,
 }
 
 #[derive(Default)]
@@ -23,8 +32,8 @@ pub struct HeadlampActor;
 #[async_trait]
 impl Actor for HeadlampActor {
     type Msg = HeadlampActorVocabulary;
-    type State = HeadlampContext;
-    type Arguments = HeadlampContext;
+    type State = HeadlampActorState;
+    type Arguments = HeadlampActorState;
 
     async fn pre_start(
         &self,
@@ -41,15 +50,21 @@ impl Actor for HeadlampActor {
             message,
             now,
             turn_id,
+            tell_attempt,
             brain,
         }: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let zone_reply = state.on_receiving_message(message, now);
-        *state = zone_reply.ctx.clone();
+        if state.silent {
+            return Ok(());
+        }
+
+        let zone_reply = state.ctx.on_receiving_message(message, now);
+        state.ctx = zone_reply.ctx.clone();
         brain
             .send_message(DigitalTwinCarVocabulary::HeadlampZoneReady {
                 turn_id,
+                tell_attempt,
                 reply: zone_reply,
             })
             .map_err(|e| {
@@ -66,6 +81,7 @@ pub fn tell_headlamp_zone(
     headlamp: &ActorRef<HeadlampActorVocabulary>,
     brain: &ActorRef<DigitalTwinCarVocabulary>,
     turn_id: u64,
+    tell_attempt: u32,
     message: HeadlampMessage,
     now: Instant,
 ) -> Result<(), ActorProcessingErr> {
@@ -74,6 +90,7 @@ pub fn tell_headlamp_zone(
             message,
             now,
             turn_id,
+            tell_attempt,
             brain: brain.clone(),
         })
         .map_err(|e| {

@@ -175,7 +175,14 @@ pub enum DigitalTwinCarVocabulary {
     /// Headlamp twinlet tell-back after [`crate::twin_runtime::headlamp_actor::HeadlampActor`] applied one message.
     HeadlampZoneReady {
         turn_id: u64,
+        /// Matches the `tell_attempt` on the tell that produced this reply (retry correlation).
+        tell_attempt: u32,
         reply: crate::vehicle_state::HeadlampZoneReply,
+    },
+    /// Ractor deadline: zone twinlet did not tell-back in [`crate::twin_runtime::constants::ZONE_TELL_BACK_WAIT`].
+    TellBackTimeout {
+        turn_id: u64,
+        tell_attempt: u32,
     },
     /// Return an as-of snapshot of the twin (stamped with `as_of_seq`); does **not** call
     /// [`crate::fsm::transition`].
@@ -198,9 +205,9 @@ impl TryFrom<DigitalTwinCarVocabulary> for FsmEvent {
     fn try_from(value: DigitalTwinCarVocabulary) -> Result<Self, Self::Error> {
         match value {
             DigitalTwinCarVocabulary::Fsm(e) => Ok(e),
-            DigitalTwinCarVocabulary::GetStatus(_) | DigitalTwinCarVocabulary::HeadlampZoneReady { .. } => {
-                Err(NotFsmVocabulary)
-            }
+            DigitalTwinCarVocabulary::GetStatus(_)
+            | DigitalTwinCarVocabulary::HeadlampZoneReady { .. }
+            | DigitalTwinCarVocabulary::TellBackTimeout { .. } => Err(NotFsmVocabulary),
         }
     }
 }
@@ -210,7 +217,9 @@ impl DigitalTwinCarVocabulary {
     pub fn as_fsm_event(&self) -> Option<&FsmEvent> {
         match self {
             Self::Fsm(e) => Some(e),
-            Self::GetStatus(_) | Self::HeadlampZoneReady { .. } => None,
+            Self::GetStatus(_)
+            | Self::HeadlampZoneReady { .. }
+            | Self::TellBackTimeout { .. } => None,
         }
     }
 
@@ -218,7 +227,9 @@ impl DigitalTwinCarVocabulary {
     pub fn into_fsm_event(self) -> Option<FsmEvent> {
         match self {
             Self::Fsm(e) => Some(e),
-            Self::GetStatus(_) | Self::HeadlampZoneReady { .. } => None,
+            Self::GetStatus(_)
+            | Self::HeadlampZoneReady { .. }
+            | Self::TellBackTimeout { .. } => None,
         }
     }
 }

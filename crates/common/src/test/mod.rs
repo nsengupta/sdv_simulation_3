@@ -29,6 +29,9 @@ mod fsm_step_contract;
 mod lighting_step_contract;
 
 #[cfg(test)]
+mod zone_tell_back_contract;
+
+#[cfg(test)]
 mod operational_policy_contract;
 
 #[cfg(test)]

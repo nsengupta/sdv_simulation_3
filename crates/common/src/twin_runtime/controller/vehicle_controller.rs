@@ -29,6 +29,9 @@ pub struct VehicleControllerRuntimeOptions {
     pub actuation_command_tx: Option<tokio::sync::mpsc::Sender<ActuationCommand>>,
     pub diagnostic_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::diagnostic::DiagnosticMessage>>,
     pub transition_tx: Option<tokio::sync::mpsc::Sender<PublishedTransitionRecord>>,
+    /// Contract tests: headlamp twinlet ignores tells (exercises tell-back timeout path).
+    #[doc(hidden)]
+    pub test_silent_headlamp: bool,
 }
 
 impl Default for VehicleControllerRuntimeOptions {
@@ -38,6 +41,7 @@ impl Default for VehicleControllerRuntimeOptions {
             actuation_command_tx: None,
             diagnostic_tx: None,
             transition_tx: None,
+            test_silent_headlamp: false,
         }
     }
 }
