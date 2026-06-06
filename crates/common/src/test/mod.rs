@@ -11,6 +11,9 @@
 mod actor_contract;
 
 #[cfg(test)]
+mod headlamp_ack_timer_contract;
+
+#[cfg(test)]
 mod headlamp_reply_contract;
 
 #[cfg(test)]
@@ -27,6 +30,12 @@ mod fsm_step_contract;
 
 #[cfg(test)]
 mod lighting_step_contract;
+
+#[cfg(test)]
+mod quiescence_actor_contract;
+
+#[cfg(test)]
+mod zone_replies_contract;
 
 #[cfg(test)]
 mod zone_tell_back_contract;
@@ -76,9 +85,47 @@ impl<T: ractor::Message> Drop for ActorGuard<T> {
 // reuse the existing public seams (`VehicleControllerRuntimeOptions`, `submit_physical_car_event`).
 
 use crate::digital_twin::DigitalTwinCarVocabulary;
+use crate::fsm::FsmEvent;
 use crate::twin_runtime::controller::vehicle_controller::VehicleControllerRuntimeOptions;
+use crate::vehicle_physics::LUX_ON_THRESHOLD;
 use crate::{ActuationCommand, PhysicalCarVocabulary, VehicleController};
 use tokio::sync::mpsc;
+
+/// Bright ambient so operational driving tests do not synthesize `LightingUnsafe` on entry.
+pub async fn submit_daylight_ambient(controller: &VehicleController) {
+    controller
+        .submit_fsm_event(FsmEvent::UpdateAmbientLux(LUX_ON_THRESHOLD + 100))
+        .await
+        .expect("bright ambient ingress");
+    wait_ambient_lux(
+        controller,
+        LUX_ON_THRESHOLD + 100,
+        std::time::Duration::from_millis(500),
+    )
+    .await;
+}
+
+async fn wait_ambient_lux(
+    controller: &VehicleController,
+    expected: u16,
+    timeout: std::time::Duration,
+) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(snapshot) = controller
+            .get_snapshot(Some(ractor::concurrency::Duration::from_millis(50)))
+            .await
+        {
+            if snapshot.context().visibility.ambient_lux == expected {
+                return;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out waiting for ambient_lux {expected}");
+        }
+        tokio::task::yield_now().await;
+    }
+}
 
 /// Install a controller with an injected actuation channel, returning the controller, the
 /// `rx` end the harness observes, and the lifetime guard.

@@ -118,12 +118,8 @@ async fn controller_fsm_front_headlamp_no_response_timeout_path() {
         .await
         .expect("low lux event");
 
-    // No ACK/NACK event sent: emulate silence, then drive TimerTick past ACK wait deadline.
+    // No ACK/NACK event sent: headlamp twinlet ACK timer fires without gateway TimerTick.
     tokio::time::sleep(FRONT_HEADLAMP_ON_ACK_WAIT + Duration::from_millis(25)).await;
-    controller
-        .submit_physical_car_event(PhysicalCarVocabulary::TimerTick)
-        .await
-        .expect("timer tick");
     wait_headlamp_state(&controller, HeadlampState::Off, Duration::from_millis(500)).await;
 
     let snapshot = controller

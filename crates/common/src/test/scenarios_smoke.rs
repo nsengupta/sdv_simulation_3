@@ -37,6 +37,27 @@ async fn get_snapshot(
     }
 }
 
+async fn wait_for_ambient_lux(
+    actor: &ractor::ActorRef<DigitalTwinCarVocabulary>,
+    expected: u16,
+    timeout: std::time::Duration,
+) -> crate::CarSnapshot {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let snapshot = get_snapshot(actor, DEFAULT_ACTOR_TIMEOUT).await;
+        if snapshot.context().visibility.ambient_lux == expected {
+            return snapshot;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for ambient_lux {expected}, last={}",
+                snapshot.context().visibility.ambient_lux
+            );
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 #[tokio::test]
 async fn scenario_cold_start_get_status_shows_off() {
     let (actor, handle) = Actor::spawn(None, VirtualCarActor::default(), "QUICK".into())
@@ -64,6 +85,19 @@ async fn scenario_power_on_then_drive_rpm_enters_driving() {
     actor
         .send_message(DigitalTwinCarVocabulary::from(FsmEvent::PowerOn))
         .unwrap();
+    actor
+        .send_message(DigitalTwinCarVocabulary::from(FsmEvent::UpdateAmbientLux(
+            crate::vehicle_physics::LUX_ON_THRESHOLD + 100,
+        )))
+        .unwrap();
+
+    wait_for_ambient_lux(
+        &actor,
+        crate::vehicle_physics::LUX_ON_THRESHOLD + 100,
+        std::time::Duration::from_millis(250),
+    )
+    .await;
+
     actor
         .send_message(DigitalTwinCarVocabulary::from(FsmEvent::UpdateRpm(1200)))
         .unwrap();
@@ -108,6 +142,19 @@ async fn scenario_redline_rpm_from_driving_enters_warning() {
     actor
         .send_message(DigitalTwinCarVocabulary::from(FsmEvent::PowerOn))
         .unwrap();
+    actor
+        .send_message(DigitalTwinCarVocabulary::from(FsmEvent::UpdateAmbientLux(
+            crate::vehicle_physics::LUX_ON_THRESHOLD + 100,
+        )))
+        .unwrap();
+
+    let _ = wait_for_ambient_lux(
+        &actor,
+        crate::vehicle_physics::LUX_ON_THRESHOLD + 100,
+        std::time::Duration::from_millis(250),
+    )
+    .await;
+
     actor
         .send_message(DigitalTwinCarVocabulary::from(FsmEvent::UpdateRpm(2000)))
         .unwrap();

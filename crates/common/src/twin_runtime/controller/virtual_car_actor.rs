@@ -22,11 +22,13 @@ use crate::twin_runtime::controller::actuation_manager::{
 use crate::twin_runtime::controller::vehicle_controller::VehicleControllerRuntimeOptions;
 use crate::fsm::{
     self, ActorModeHintFromDomain, DomainAction, FrontHeadlampSwitchDirection, FsmEvent, FsmState,
-    HeadlampState, StepResult,
+    HeadlampState,
 };
-use crate::twin_runtime::headlamp_actor::{tell_headlamp_zone, HeadlampActor, HeadlampActorState, HeadlampActorVocabulary};
-use crate::twin_runtime::twin_turn::{commit_brain_turn, fsm_step_lands_off};
+use crate::twin_runtime::headlamp_actor::{tell_headlamp_zone, HeadlampActor, HeadlampActorMsg, HeadlampActorState};
+use crate::twin_runtime::twin_turn::{commit_resolved_turn as resolve_quiescence, fsm_step_lands_off, ResolvedTurn};
+use crate::twin_runtime::ZoneReplies;
 use crate::twin_runtime::zone_tell_back::{on_tell_back_timeout, TellBackTimeoutOutcome, TellBackWait};
+use crate::twin_runtime::QuiescentResult;
 use crate::twin_runtime::zone_turn::fsm_event_headlamp_message;
 use crate::vehicle_state::{HeadlampMessage, HeadlampZoneReply, VehicleContext};
 use crate::published::{PublishedTransitionRecord, SessionEpoch};
@@ -81,7 +83,7 @@ enum PendingBrainTurn {
 
 pub struct VirtualCarRuntimeState {
     twin_car: DigitalTwinCar,
-    headlamp_actor: ActorRef<HeadlampActorVocabulary>,
+    headlamp_actor: ActorRef<HeadlampActorMsg>,
     next_turn_id: u64,
     pending_turn: Option<PendingBrainTurn>,
     fsm_backlog: VecDeque<(FsmEvent, Instant)>,
@@ -168,10 +170,10 @@ impl Actor for VirtualCarActor {
             };
 
         let initial_ctx = VehicleContext::default();
-        let (headlamp_actor, _) = ractor::spawn::<HeadlampActor>(HeadlampActorState {
-            ctx: initial_ctx.headlamp.clone(),
-            silent: args.runtime_options.test_silent_headlamp,
-        })
+        let (headlamp_actor, _) = ractor::spawn::<HeadlampActor>(HeadlampActorState::new(
+            initial_ctx.headlamp.clone(),
+            args.runtime_options.test_silent_headlamp,
+        ))
         .await?;
 
         Ok(VirtualCarRuntimeState {
@@ -195,7 +197,7 @@ impl Actor for VirtualCarActor {
         message: Self::Msg,
         runtime_state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use DigitalTwinCarVocabulary::{Fsm, GetStatus, HeadlampZoneReady, TellBackTimeout};
+        use DigitalTwinCarVocabulary::{Fsm, GetStatus, HeadlampZoneReady, HeadlampZoneSpontaneous, TellBackTimeout};
 
         match message {
             Fsm(evt) => {
@@ -233,6 +235,14 @@ impl Actor for VirtualCarActor {
                 tell_attempt,
             } => {
                 Self::on_tell_back_timeout(&myself, runtime_state, turn_id, tell_attempt).await?;
+                Self::pump_fsm_backlog(&myself, runtime_state).await
+            }
+            HeadlampZoneSpontaneous {
+                direction,
+                cause,
+                reply,
+            } => {
+                Self::on_headlamp_zone_spontaneous(runtime_state, direction, cause, reply).await?;
                 Self::pump_fsm_backlog(&myself, runtime_state).await
             }
             GetStatus(reply) => Self::reply_get_status(
@@ -359,7 +369,7 @@ impl VirtualCarActor {
             runtime_state.twin_car.context(),
             &event,
             now,
-            None,
+            &ZoneReplies::simulate_locally(),
         ) {
             return Self::begin_headlamp_wait(
                 brain,
@@ -373,15 +383,11 @@ impl VirtualCarActor {
             .await;
         }
 
-        let result = commit_brain_turn(
-            runtime_state.twin_car.current_state(),
-            runtime_state.twin_car.context(),
-            &event,
-            now,
-            None,
-            None,
-        );
-        Self::apply_committed_turn(runtime_state, &event, result).await
+        Self::commit_resolved_turn(
+            runtime_state,
+            Self::resolved_turn(event, now, None, None),
+        )
+        .await
     }
 
     async fn on_headlamp_zone_ready(
@@ -409,7 +415,7 @@ impl VirtualCarActor {
                     runtime_state.twin_car.context(),
                     &event,
                     now,
-                    Some(&reply),
+                    &ZoneReplies::with_headlamp(Some(reply.clone()), None),
                 ) {
                     return Self::begin_headlamp_wait(
                         brain,
@@ -422,15 +428,11 @@ impl VirtualCarActor {
                     )
                     .await;
                 }
-                let result = commit_brain_turn(
-                    runtime_state.twin_car.current_state(),
-                    runtime_state.twin_car.context(),
-                    &event,
-                    now,
-                    Some(reply),
-                    None,
-                );
-                Self::apply_committed_turn(runtime_state, &event, result).await?;
+                Self::commit_resolved_turn(
+                    runtime_state,
+                    Self::resolved_turn(event, now, Some(reply), None),
+                )
+                .await?;
             }
             PendingBrainTurn::IgnitionOffReset {
                 wait,
@@ -440,15 +442,11 @@ impl VirtualCarActor {
                 headlamp_reply,
             } if wait.matches(turn_id, tell_attempt) => {
                 Self::abort_tell_back_timer(&mut timer);
-                let result = commit_brain_turn(
-                    runtime_state.twin_car.current_state(),
-                    runtime_state.twin_car.context(),
-                    &event,
-                    now,
-                    headlamp_reply,
-                    Some(reply),
-                );
-                Self::apply_committed_turn(runtime_state, &event, result).await?;
+                Self::commit_resolved_turn(
+                    runtime_state,
+                    Self::resolved_turn(event, now, headlamp_reply, Some(reply)),
+                )
+                .await?;
             }
             other => {
                 runtime_state.pending_turn = Some(other);
@@ -500,15 +498,11 @@ impl VirtualCarActor {
                         });
                     }
                     TellBackTimeoutOutcome::Exhausted(reply) => {
-                        let result = commit_brain_turn(
-                            runtime_state.twin_car.current_state(),
-                            runtime_state.twin_car.context(),
-                            &event,
-                            now,
-                            Some(reply),
-                            None,
-                        );
-                        Self::apply_committed_turn(runtime_state, &event, result).await?;
+                        Self::commit_resolved_turn(
+                            runtime_state,
+                            Self::resolved_turn(event, now, Some(reply), None),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -543,15 +537,11 @@ impl VirtualCarActor {
                         });
                     }
                     TellBackTimeoutOutcome::Exhausted(reply) => {
-                        let result = commit_brain_turn(
-                            runtime_state.twin_car.current_state(),
-                            runtime_state.twin_car.context(),
-                            &event,
-                            now,
-                            headlamp_reply,
-                            Some(reply),
-                        );
-                        Self::apply_committed_turn(runtime_state, &event, result).await?;
+                        Self::commit_resolved_turn(
+                            runtime_state,
+                            Self::resolved_turn(event, now, headlamp_reply, Some(reply)),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -561,6 +551,23 @@ impl VirtualCarActor {
         }
 
         Ok(())
+    }
+
+    async fn on_headlamp_zone_spontaneous(
+        runtime_state: &mut VirtualCarRuntimeState,
+        direction: crate::fsm::FrontHeadlampSwitchDirection,
+        cause: crate::fsm::FrontHeadlampIncompleteCause,
+        reply: HeadlampZoneReply,
+    ) -> Result<(), ActorProcessingErr> {
+        Self::commit_resolved_turn(
+            runtime_state,
+            ResolvedTurn {
+                ingress: FsmEvent::FrontHeadlampActuationIncomplete { direction, cause },
+                now: Instant::now(),
+                zone_replies: ZoneReplies::with_headlamp_ingress(reply),
+            },
+        )
+        .await
     }
 
     async fn pump_fsm_backlog(
@@ -576,24 +583,53 @@ impl VirtualCarActor {
         Ok(())
     }
 
-    async fn apply_committed_turn(
+    fn resolved_turn(
+        ingress: FsmEvent,
+        now: Instant,
+        headlamp_ingress: Option<HeadlampZoneReply>,
+        headlamp_ignition_off_reset: Option<HeadlampZoneReply>,
+    ) -> ResolvedTurn {
+        ResolvedTurn {
+            ingress,
+            now,
+            zone_replies: ZoneReplies::with_headlamp(headlamp_ingress, headlamp_ignition_off_reset),
+        }
+    }
+
+    async fn commit_resolved_turn(
         runtime_state: &mut VirtualCarRuntimeState,
-        event: &FsmEvent,
-        result: StepResult,
+        resolved: ResolvedTurn,
+    ) -> Result<(), ActorProcessingErr> {
+        let quiescent = resolve_quiescence(
+            runtime_state.twin_car.current_state(),
+            runtime_state.twin_car.context(),
+            resolved,
+        );
+        Self::apply_committed_quiescence(runtime_state, quiescent).await
+    }
+
+    async fn apply_committed_quiescence(
+        runtime_state: &mut VirtualCarRuntimeState,
+        quiescent: QuiescentResult,
     ) -> Result<(), ActorProcessingErr> {
         let old_state = runtime_state.twin_car.current_state().clone();
         let headlamp_before = runtime_state.twin_car.context().headlamp.state;
-        let headlamp_after = result.modified_ctx.headlamp.state;
+        let final_step = quiescent.final_step();
+        let headlamp_after = final_step.modified_ctx.headlamp.state;
         let mut mode = ActorMode::Normal;
 
-        let record_seq = runtime_state.next_record_seq;
-        runtime_state.next_record_seq = runtime_state.next_record_seq.saturating_add(1);
+        for hop in &quiescent.hops {
+            let record_seq = runtime_state.next_record_seq;
+            runtime_state.next_record_seq = runtime_state.next_record_seq.saturating_add(1);
+            Self::try_emit_transition_record(runtime_state, record_seq, hop.result.transition_record.clone());
+        }
 
-        runtime_state.twin_car.apply_step(result.next_state.clone(), result.modified_ctx);
+        runtime_state.twin_car.apply_step(
+            final_step.next_state.clone(),
+            final_step.modified_ctx.clone(),
+        );
 
-        Self::try_emit_transition_record(runtime_state, record_seq, result.transition_record);
-
-        for action in result.actions {
+        for action in quiescent.merged_actions() {
             match action {
                 DomainAction::EnterMode(hint) => {
                     mode = match hint {
@@ -649,7 +685,6 @@ impl VirtualCarActor {
         }
 
         let _ = mode;
-        let _ = event;
         Ok(())
     }
 

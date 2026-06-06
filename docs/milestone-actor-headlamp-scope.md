@@ -33,6 +33,7 @@ Turn the **headlamp zone** from in-process `HeadlampContext` + parent `zone_turn
 | **`HeadlampContext::on_receiving_message`** | L1 pure handler → `HeadlampZoneReply` (pattern for all zones). |
 | **`tell_headlamp_zone`** | Brain **tell** to twinlet (`send_message`, no reply port). |
 | **`HeadlampActorVocabulary`** | Tell payload: message, `turn_id`, brain `ActorRef`. |
+| **`HeadlampZoneSpontaneous`** | Twinlet tell-back for zone-owned deadlines (ACK wait); brain commits with matching `FrontHeadlampActuationIncomplete` ingress. |
 | **`DigitalTwinCarVocabulary::HeadlampZoneReady`** | Twinlet tell-back; brain then [`commit_brain_turn`]. |
 
 Avoid `*Turn` for zone replies — reserved for brain/FSM (`twin_turn`, `brain_twin_turn`).
@@ -66,7 +67,7 @@ The twin tells the **world** how the **physical sibling** is behaving **right no
 Driving + lux low → tell headlamp → OnRequested, CMD sent
 … N seconds, no ACK …
 tell-back: timed out, lamp Off, LogWarning
-hop 1: external TimerTick → cut still Driving
+hop 1: spontaneous incomplete (headlamp ACK timer) → cut still Driving
 detector → Internal(Operational::LightingUnsafe)
 hop 2: table → DrivingDangerously + StartBuzzer (ledger row for Internal)
 ```
@@ -184,7 +185,8 @@ Brain → tell HeadlampActor → HeadlampZoneReady → commit_brain_turn → app
 | ---- | ---- |
 | L1 reply + apply | `crates/common/src/vehicle_state/front_headlamp.rs` |
 | Headlamp actor | `crates/common/src/twin_runtime/headlamp_actor.rs` |
-| Demux / twin turn | `crates/common/src/twin_runtime/{zone_turn,twin_turn}.rs` |
+| Demux / twin turn | `crates/common/src/twin_runtime/{zone_turn,twin_turn,zone_replies}.rs` |
+| ACK timer tests | `crates/common/src/test/{headlamp_ack_timer_contract,quiescence_actor_contract}.rs` |
 | Brain | `crates/common/src/twin_runtime/controller/virtual_car_actor.rs` |
 | Step 4 tests | `crates/common/src/test/headlamp_reply_contract.rs` |
 
@@ -200,7 +202,18 @@ Brain → tell HeadlampActor → HeadlampZoneReady → commit_brain_turn → app
 | 4 Ledger/reply tests | done | `headlamp_reply_contract.rs` |
 | 5 README | done | `e18fd35` — first zone actorification slice |
 | 6 Tell / tell-back (no send/wait) | done | `tell_headlamp_zone`, `HeadlampZoneReady`, backlog |
-| 7 Operational policy on tell-back | **TDD** | ADR-7 confirmations; **add red tests first** (one-by-one), then `run_to_quiescence` + impl |
+| 7 Operational policy + quiescence | done | `commit_resolved_turn`, `run_to_quiescence`, actor path; `ZoneReplies` |
+| 8 Headlamp ACK timer (actor-owned) | done | `send_after(FRONT_HEADLAMP_*_ACK_WAIT)` in twinlet; `HeadlampZoneSpontaneous`; actor path no longer routes `TimerTick` to headlamp |
+| 9 Tell-back race + retries | done | `0be0b59` — `TellBackTimeout`, synthetic embed on exhaustion |
+| 10 `HeadlampReplies.ingress` naming | done | was `primary` — tell-back for demuxed ingress message |
+
+**Not in this branch (explicitly deferred):**
+
+| Item | Notes |
+| ---- | ----- |
+| Item 3 — precedence / DrivingDangerously actor smoke beyond quiescence | Not gate for zone template |
+| Gateway `TimerTick` removal | Still drives FSM cooldown / danger recovery; headlamp ACK no longer depends on it on actor path |
+| ADR-6 power barrier | Next milestone after headlamp template |
 
 ---
 

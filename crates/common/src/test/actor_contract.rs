@@ -110,6 +110,7 @@ async fn scenario_log_warning_is_routed_to_diagnostic_sink() {
     // speed-threshold LogWarning intent.
     for evt in [
         FsmEvent::PowerOn,
+        FsmEvent::UpdateAmbientLux(crate::vehicle_physics::LUX_ON_THRESHOLD + 100),
         FsmEvent::UpdateRpm(2000),
         FsmEvent::UpdateRpm(7500),
     ] {

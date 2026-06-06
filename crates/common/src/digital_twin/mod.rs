@@ -179,6 +179,12 @@ pub enum DigitalTwinCarVocabulary {
         tell_attempt: u32,
         reply: crate::vehicle_state::HeadlampZoneReply,
     },
+    /// Zone-initiated hop (ACK timer, future assembly deadlines) — not correlated to a brain `turn_id`.
+    HeadlampZoneSpontaneous {
+        direction: crate::fsm::FrontHeadlampSwitchDirection,
+        cause: crate::fsm::FrontHeadlampIncompleteCause,
+        reply: crate::vehicle_state::HeadlampZoneReply,
+    },
     /// Ractor deadline: zone twinlet did not tell-back in [`crate::twin_runtime::constants::ZONE_TELL_BACK_WAIT`].
     TellBackTimeout {
         turn_id: u64,
@@ -207,6 +213,7 @@ impl TryFrom<DigitalTwinCarVocabulary> for FsmEvent {
             DigitalTwinCarVocabulary::Fsm(e) => Ok(e),
             DigitalTwinCarVocabulary::GetStatus(_)
             | DigitalTwinCarVocabulary::HeadlampZoneReady { .. }
+            | DigitalTwinCarVocabulary::HeadlampZoneSpontaneous { .. }
             | DigitalTwinCarVocabulary::TellBackTimeout { .. } => Err(NotFsmVocabulary),
         }
     }
@@ -219,6 +226,7 @@ impl DigitalTwinCarVocabulary {
             Self::Fsm(e) => Some(e),
             Self::GetStatus(_)
             | Self::HeadlampZoneReady { .. }
+            | Self::HeadlampZoneSpontaneous { .. }
             | Self::TellBackTimeout { .. } => None,
         }
     }
@@ -229,6 +237,7 @@ impl DigitalTwinCarVocabulary {
             Self::Fsm(e) => Some(e),
             Self::GetStatus(_)
             | Self::HeadlampZoneReady { .. }
+            | Self::HeadlampZoneSpontaneous { .. }
             | Self::TellBackTimeout { .. } => None,
         }
     }

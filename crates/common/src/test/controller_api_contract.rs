@@ -23,6 +23,7 @@ async fn given_physical_car_event_when_submitted_then_controller_drives_actor_st
         .submit_fsm_event(FsmEvent::PowerOn)
         .await
         .expect("power on should enqueue");
+    crate::test::submit_daylight_ambient(&controller).await;
     controller
         .submit_physical_car_event(PhysicalCarVocabulary::TelemetryUpdate(
             crate::VssSignal::EngineRpm(1500),
@@ -88,7 +89,7 @@ async fn given_applied_events_when_get_snapshot_then_as_of_seq_counts_every_even
         .expect("snapshot");
     assert_eq!(fresh.as_of_seq(), 0);
 
-    // Each applied FSM event advances Counter A by exactly one, sink or not.
+    // Each ledger row advances as_of_seq; quiescence may emit multiple rows per external ingress.
     controller
         .submit_fsm_event(FsmEvent::PowerOn)
         .await
@@ -109,13 +110,17 @@ async fn given_applied_events_when_get_snapshot_then_as_of_seq_counts_every_even
         .get_snapshot(Some(Duration::from_millis(250)))
         .await
         .expect("snapshot");
-    assert_eq!(after_two.as_of_seq(), 2);
+    assert_eq!(
+        after_two.as_of_seq(),
+        3,
+        "dark driving entry emits zone hop + internal hop rows"
+    );
     // A pure query does not advance the ledger.
     let again = controller
         .get_snapshot(Some(Duration::from_millis(250)))
         .await
         .expect("snapshot");
-    assert_eq!(again.as_of_seq(), 2);
+    assert_eq!(again.as_of_seq(), 3);
 }
 
 #[tokio::test]

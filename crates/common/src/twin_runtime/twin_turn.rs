@@ -1,16 +1,15 @@
 //! L4 turn: [`zone_turn`] then L2 [`step`], merge zone outcomes into [`DomainAction`].
 //!
-//! **Today:** one hop per [`commit_brain_turn`]; [`run_to_quiescence`] for ADR-7 multi-hop turns.
-//! One `commit_resolved_turn` helper in the actor should replace split commit/apply paths.
-//! See `docs/adr-007-fsm-quiescence-and-cut.md`.
+//! Actor commit uses [`commit_resolved_turn`] → [`run_to_quiescence`]. See `docs/adr-007-fsm-quiescence-and-cut.md`.
 
 use std::time::Instant;
 
 use crate::fsm::{step, DomainAction, FsmEvent, FsmState, StepResult};
 use crate::twin_runtime::detectors::detect_internal_after_hop;
 use crate::twin_runtime::outcome_map::headlamp_outcomes_to_domain_actions;
+use crate::twin_runtime::zone_replies::ZoneReplies;
 use crate::twin_runtime::zone_turn::zone_turn;
-use crate::vehicle_state::{HeadlampMessage, HeadlampZoneReply, VehicleContext};
+use crate::vehicle_state::{HeadlampMessage, VehicleContext};
 
 const MAX_QUIESCENCE_HOPS: usize = 8;
 
@@ -43,32 +42,43 @@ impl QuiescentResult {
     }
 }
 
-/// Full deterministic turn (pure tests — headlamp applied locally in [`zone_turn`]).
+/// Full deterministic turn (pure tests — zones applied locally via [`ZoneReplies::simulate_locally`]).
 pub fn twin_turn(
     current_state: &FsmState,
     current_ctx: &VehicleContext,
     event: &FsmEvent,
     now: Instant,
 ) -> StepResult {
-    twin_turn_with_headlamp_replies(current_state, current_ctx, event, now, None, None)
-}
-
-/// Brain path after tell-back: one [`twin_turn_with_headlamp_replies`] (apply_step / ledger stay in actor).
-pub fn commit_brain_turn(
-    current_state: &FsmState,
-    current_ctx: &VehicleContext,
-    event: &FsmEvent,
-    now: Instant,
-    headlamp_reply: Option<HeadlampZoneReply>,
-    ignition_off_reply: Option<HeadlampZoneReply>,
-) -> StepResult {
-    twin_turn_with_headlamp_replies(
+    apply_external_hop(
         current_state,
         current_ctx,
         event,
         now,
-        headlamp_reply,
-        ignition_off_reply,
+        &ZoneReplies::simulate_locally(),
+    )
+}
+
+/// Inputs complete after zone tell-back(s) — moved into [`commit_resolved_turn`], not stored on actor.
+#[must_use]
+#[derive(Debug, Clone)]
+pub struct ResolvedTurn {
+    pub ingress: FsmEvent,
+    pub now: Instant,
+    pub zone_replies: ZoneReplies,
+}
+
+/// Mandatory quiescence at commit boundary (ADR-7).
+pub fn commit_resolved_turn(
+    initial_state: &FsmState,
+    initial_ctx: &VehicleContext,
+    resolved: ResolvedTurn,
+) -> QuiescentResult {
+    run_to_quiescence(
+        initial_state,
+        initial_ctx,
+        &resolved.ingress,
+        resolved.now,
+        &resolved.zone_replies,
     )
 }
 
@@ -78,8 +88,7 @@ pub fn run_to_quiescence(
     initial_ctx: &VehicleContext,
     ingress: &FsmEvent,
     now: Instant,
-    headlamp_reply: Option<HeadlampZoneReply>,
-    ignition_off_reply: Option<HeadlampZoneReply>,
+    zone_replies: &ZoneReplies,
 ) -> QuiescentResult {
     let mut queue = vec![ingress.clone()];
     let mut state = initial_state.clone();
@@ -93,22 +102,13 @@ pub fn run_to_quiescence(
         queue.remove(0);
 
         let is_first = hops.is_empty();
-        let result = apply_single_hop(
-            &state,
-            &ctx,
-            &event,
-            now,
-            if is_first {
-                headlamp_reply.clone()
-            } else {
-                None
-            },
-            if is_first {
-                ignition_off_reply.clone()
-            } else {
-                None
-            },
-        );
+        let hop_replies = if is_first {
+            zone_replies
+        } else {
+            &ZoneReplies::default()
+        };
+
+        let result = apply_single_hop(&state, &ctx, &event, now, hop_replies);
 
         if let Some(internal) = detect_internal_after_hop(&result.next_state, &result.modified_ctx) {
             queue.push(internal);
@@ -128,7 +128,7 @@ pub(crate) fn fsm_step_lands_off(
     current_ctx: &VehicleContext,
     event: &FsmEvent,
     now: Instant,
-    headlamp_reply: Option<&HeadlampZoneReply>,
+    zone_replies: &ZoneReplies,
 ) -> bool {
     if *current_state == FsmState::Off {
         return false;
@@ -139,13 +139,7 @@ pub(crate) fn fsm_step_lands_off(
             FsmState::Off
         );
     }
-    let zone = zone_turn(
-        current_ctx,
-        event,
-        current_state,
-        now,
-        headlamp_reply.cloned(),
-    );
+    let zone = zone_turn(current_ctx, event, current_state, now, zone_replies);
     matches!(
         step(current_state, &zone.ctx, event, now).next_state,
         FsmState::Off
@@ -157,20 +151,12 @@ fn apply_single_hop(
     current_ctx: &VehicleContext,
     event: &FsmEvent,
     now: Instant,
-    headlamp_reply: Option<HeadlampZoneReply>,
-    ignition_off_reply: Option<HeadlampZoneReply>,
+    zone_replies: &ZoneReplies,
 ) -> StepResult {
     if matches!(event, FsmEvent::Internal(_)) {
         apply_internal_hop(current_state, current_ctx, event, now)
     } else {
-        twin_turn_with_headlamp_replies(
-            current_state,
-            current_ctx,
-            event,
-            now,
-            headlamp_reply,
-            ignition_off_reply,
-        )
+        apply_external_hop(current_state, current_ctx, event, now, zone_replies)
     }
 }
 
@@ -183,22 +169,20 @@ fn apply_internal_hop(
     step(current_state, current_ctx, event, now)
 }
 
-/// One brain FSM event. `headlamp_reply` / `ignition_off_reply`: when `Some`, twinlet already
-/// applied that message (A→C bridge — see milestone doc); `None` → local [`HeadlampContext::on_receiving_message`].
-fn twin_turn_with_headlamp_replies(
+/// One external FSM hop: zone merge (tell-back or local L1) then L2 [`step`].
+fn apply_external_hop(
     current_state: &FsmState,
     current_ctx: &VehicleContext,
     event: &FsmEvent,
     now: Instant,
-    headlamp_reply: Option<HeadlampZoneReply>,
-    ignition_off_reply: Option<HeadlampZoneReply>,
+    zone_replies: &ZoneReplies,
 ) -> StepResult {
-    let zone = zone_turn(current_ctx, event, current_state, now, headlamp_reply);
+    let zone = zone_turn(current_ctx, event, current_state, now, zone_replies);
     let mut result = step(current_state, &zone.ctx, event, now);
 
     let mut headlamp_outcomes = zone.headlamp_outcomes;
     if matches!(result.next_state, FsmState::Off) {
-        let zone_reply = ignition_off_reply.unwrap_or_else(|| {
+        let zone_reply = zone_replies.headlamp.ignition_off_reset.clone().unwrap_or_else(|| {
             result.modified_ctx.headlamp.on_receiving_message(
                 HeadlampMessage::ResetForIgnitionOff,
                 now,

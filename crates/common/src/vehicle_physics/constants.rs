@@ -40,8 +40,14 @@ pub const LUX_ON_THRESHOLD: u16 = 840;
 pub const LUX_OFF_THRESHOLD: u16 = 860;
 
 /// Maximum time to wait for an ON command ACK before timeout recovery.
+#[cfg(test)]
+pub const FRONT_HEADLAMP_ON_ACK_WAIT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
 pub const FRONT_HEADLAMP_ON_ACK_WAIT: Duration = Duration::from_secs(2);
 /// Maximum time to wait for an OFF command ACK before timeout recovery.
+#[cfg(test)]
+pub const FRONT_HEADLAMP_OFF_ACK_WAIT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
 pub const FRONT_HEADLAMP_OFF_ACK_WAIT: Duration = Duration::from_secs(2);
 
 #[inline]

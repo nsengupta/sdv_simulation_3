@@ -2,14 +2,14 @@
 //!
 //! Spec: [`docs/milestone-actor-headlamp-scope.md`](../../docs/milestone-actor-headlamp-scope.md)
 //! § Brain operational policy. Pure [`twin_turn`] stands in for post-tell-back
-//! `commit_brain_turn` until policy is wired in L2 / beside `transition_map`.
+//! `commit_resolved_turn` + [`ZoneReplies`] on the actor path; pure tests use [`ZoneReplies::simulate_locally`].
 //!
 //! **Expected (not implemented yet):** when **Driving** + dark + headlamp failed to stay ON
 //! (timeout → `Off` + zone `LogWarning`), brain enters **`DrivingDangerously`** and
 //! **`StartBuzzer`**, latched until corrective action (lamp ON, bright lux, or stationary → Idle).
 
 use crate::fsm::{DomainAction, FsmEvent, FsmState, HeadlampState, Operational};
-use crate::twin_runtime::{run_to_quiescence, twin_turn};
+use crate::twin_runtime::{run_to_quiescence, twin_turn, ZoneReplies};
 use crate::vehicle_state::VehicleContext;
 use crate::vehicle_physics::{
     FRONT_HEADLAMP_ON_ACK_WAIT, LUX_ON_THRESHOLD, RPM_DRIVING_THRESHOLD,
@@ -36,8 +36,7 @@ fn given_driving_in_dark_when_internal_lighting_unsafe_then_l1_unchanged_and_ent
         &before,
         &FsmEvent::Internal(Operational::LightingUnsafe),
         t0,
-        None,
-        None,
+        &ZoneReplies::simulate_locally(),
     );
 
     assert_eq!(result.hops.len(), 1, "single internal hop only");
@@ -78,8 +77,7 @@ fn given_driving_in_dark_when_on_requested_then_no_lighting_unsafe_internal_hop(
         &ctx,
         &FsmEvent::TimerTick,
         t0,
-        None,
-        None,
+        &ZoneReplies::simulate_locally(),
     );
 
     assert_eq!(result.hops.len(), 1, "external TimerTick only — no internal hop");
@@ -118,8 +116,7 @@ fn given_driving_in_dark_when_on_request_times_out_then_two_hop_quiescence_enter
         &ctx,
         &FsmEvent::TimerTick,
         t0 + FRONT_HEADLAMP_ON_ACK_WAIT,
-        None,
-        None,
+        &ZoneReplies::simulate_locally(),
     );
 
     assert_eq!(result.hops.len(), 2, "external zone hop then internal synthesis");
