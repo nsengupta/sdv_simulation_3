@@ -16,6 +16,32 @@ This README is the **operational truth** for running and reading the code. Blog 
 
 ---
 
+## Vocabulary
+
+Terms used throughout this README. **Zone** is SDV industry language; **BrainTwin**, **twinlet**,
+**tell**, **cut**, etc. are **ours** unless noted.
+
+| Term | Meaning |
+| ---- | ------- |
+| **Zone** | SDV: a vehicle concern (lighting, powertrain, …). Code: **zone assembly** — `{Zone}Context` in `VehicleContext`. |
+| **Twinlet** | One zone as a **child actor** under the BrainTwin (mailbox + timers). |
+| **BrainTwin** | The digital twin overall — parent actor (`VirtualCarActor`), quiescent commit, ledger, actuation. State: `DigitalTwinCar`. We say **Brain** in diagrams. |
+| **`HeadlampActor`** | The **only twinlet** in this iteration (headlamp zone). |
+| **Tell** | BrainTwin → twinlet; **fire-and-forget** (mailbox free until tell-back or timeout). |
+| **Tell-back** | Twinlet → BrainTwin reply (`turn_id`, `tell_attempt`; e.g. `HeadlampZoneReady`). |
+| **Spontaneous** | Twinlet tell-back on its **own deadline** (e.g. ACK timer), not a new CAN ingress. |
+| **Cut** | Snapshot `(FsmState, VehicleContext)` at one instant. |
+| **Quiescence** | Multi-hop resolve to a **stable cut**; one ledger row per hop; one `apply_step`. |
+| **Pyramid** | Layered modules in `common` (**L0**–**L6**, physics up to gateway/actuator binaries); acyclic imports. Detail: [`library-reorg.md`](docs/library-reorg.md). |
+
+```text
+BrainTwin (VirtualCarActor)
+├── HeadlampActor          ← only twinlet today
+└── other zones in-process ← powertrain, health, visibility
+```
+
+---
+
 ## What this iteration is about (and what it deliberately is *not*)
 
 A Rust workspace that prototypes a **software-defined vehicle control path**: telemetry and actuation on a **shared CAN bus**, a **gateway** that projects wire traffic into twin vocabulary, and a **digital twin** that maintains vehicle state, decides when to actuate, and closes the loop when the body ECU acknowledges (or fails).
@@ -25,20 +51,17 @@ Educational / demonstrator — not a product stack.
 **Iteration 1** made the control loop *work*. **Iteration 2** made it *decomposable, observable,
 and provable* — zone assemblies, a serializable transition ledger, diagnostics, and
 correct-by-construction twin APIs — while keeping the same three-process CAN demo on the surface.
-**Iteration 3** (this repo) takes the next step: the **digital twin** becomes a **BrainTwin**
-(parent) plus **twinlets** (zone child actors) — without rewriting the domain core. In this
-iteration there is only **one twinlet**: the headlamp zone (`HeadlampActor`).
+**Iteration 3** (this repo) **actorifies the first zone twinlet** without rewriting the domain core
+(see **Vocabulary**).
 
 **What Iteration 3 is *not* (yet):**
 
-- Not a full vehicle SDV stack — only the **headlamp twinlet** runs as a child actor today.
-  Powertrain, health, and visibility zones are still in-process inside the BrainTwin. (See
-  **BrainTwin and twinlets** below for vocabulary.)
+- Not a full vehicle SDV stack — only **`HeadlampActor`** is a twinlet; other zones stay in-process in the BrainTwin.
 - Not production safety certification — the correctness model is a teaching scaffold.
 - Not the offline ledger analyser — the gateway can emit a **machine-oriented transition stream**;
   the reader/report tool is designed but unbuilt (see Demo screenshots).
-- Not a replacement for the pyramid/ADR docs — layer numbers (L0–L6) live in
-  [`docs/library-reorg.md`](docs/library-reorg.md); this README uses plain names first.
+- Not a replacement for the pyramid/ADR docs — see **Pyramid** in **Vocabulary** and
+  [`docs/library-reorg.md`](docs/library-reorg.md) for layer numbers (L0–L6).
 
 ---
 
@@ -54,7 +77,7 @@ iteration there is only **one twinlet**: the headlamp zone (`HeadlampActor`).
 | **Invariants**           | Inline checks                | **`STATE_LAWS`** oracle (offline)                                                 | Same; detectors feed **internal FSM events** at commit                                           |
 | **Twin mutation**        | Public fields                | **`apply_step`** only                                                             | Same                                                                                             |
 | **Diagnostics**          | NACK/timeout only            | Silent-success ACK surfaced; off-hot-path logging                                 | **Sink injection at gateway init** (default vs ledger-only)                                      |
-| **Module layout**        | Ad hoc                       | Layering started                                                                  | **Pyramid L0–L6**, [TangleGuard](https://tangleguard.com/apps/cli) clean (`pyramid-m2-complete`) |
+| **Module layout**        | Ad hoc                       | Layering started                                                                  | **Pyramid** L0–L6 complete; [TangleGuard](https://tangleguard.com/apps/cli) clean (`pyramid-m2-complete`) |
 
 Future on the actor track: a second zone twinlet (use the **Headlamp twinlet** as a template), ADR-6 power barrier,
 actuation child actor, offline ledger verifier, optional `sdv_core` crate split.
@@ -63,68 +86,19 @@ actuation child actor, offline ledger verifier, optional `sdv_core` crate split.
 
 ## Key features added / improved (Iteration 3)
 
-### BrainTwin and twinlets (our vocabulary)
-
-Three terms, two sources:
-
-| Term          | Origin             | Meaning in this repo                                                                                                                                                                                                                                                             |
-| ------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Zone**      | SDV industry lingo | A partition of vehicle concern and twin state (lighting, powertrain, …). In code: a **zone assembly** — `{Zone}Context` inside `VehicleContext` (ADR-5).                                                                                                                         |
-| **Twinlet**   | **Our term**       | One zone’s logic running as a **child actor** under the BrainTwin, with its own mailbox and timers. Not standard SDV jargon — we use it for “a small twin scoped to one zone.”                                                                                                   |
-| **BrainTwin** | **Our term**       | The **digital twin as a whole** in the broad sense: parent actor, operational FSM commit, ledger, actuation dispatch. Implemented as **`VirtualCarActor`**; the **`DigitalTwinCar`** capsule is its authoritative state. We say **Brain** interchangeably in prose and diagrams. |
-
-```text
-Digital twin (simulation)
-└── BrainTwin (VirtualCarActor)     ← parent: ingress, quiescence, sinks, actuation
-    ├── twinlets (child actors)     ← one per actorified zone — our term
-    │   └── HeadlampActor           ← only twinlet in this iteration (headlamp zone)
-    └── other zones (in-process)    ← powertrain, health, visibility — not twinlets yet
-```
-
-**This iteration:** one BrainTwin, **one twinlet** (`HeadlampActor` for the headlamp zone). Later
-iterations add more twinlets; the BrainTwin role stays the same.
-
 ### Headlamp twinlet (`HeadlampActor`)
 
-**Zone** (SDV): body / front headlamp — lighting state and ACK bookkeeping.
-
-**Twinlet** (ours): that zone as [`HeadlampActor`](crates/common/src/twin_runtime/headlamp_actor.rs),
-a [`ractor`](https://crates.io/crates/ractor/0.15.12) child of the BrainTwin — use this **Headlamp twinlet** as a template for the next zone twinlet. Milestone handoff:
-[`docs/milestone-actor-headlamp-scope.md`](docs/milestone-actor-headlamp-scope.md).
+First **twinlet** — headlamp zone as a [`ractor`](https://crates.io/crates/ractor/0.15.12) child of the BrainTwin; use it as a template for the next zone. Handoff: [`docs/milestone-actor-headlamp-scope.md`](docs/milestone-actor-headlamp-scope.md).
 
 ### BrainTwin (`VirtualCarActor`)
 
-The **BrainTwin** is **`VirtualCarActor`** — the parent actor inside the gateway that:
+Parent actor in the gateway: ingress, **tell** / wait for **tell-back**, **`commit_resolved_turn` → `run_to_quiescence`**, ledger/diagnostic sinks, actuation dispatch. Pure **`fsm::step`** still owns operational mode transitions.
 
-- receives ingress as `DigitalTwinCarVocabulary` (FSM events, twinlet tell-backs, RPC),
-- **tells** twinlets (today: **`HeadlampActor` only**) and waits for correlated tell-back,
-- runs **`commit_resolved_turn` → `run_to_quiescence`** (ADR-7) before persisting,
-- emits **ledger** and **diagnostic** records through injected sinks,
-- dispatches **actuation** intents to the gateway CAN egress path.
+### Quiescent commit & module layout
 
-The pure **`fsm::step`** table still decides operational mode; the BrainTwin orchestrates *when*
-zones run and *when* the stable **cut** is persisted — it does not replace L2 logic.
-
-### Pyramid layout and quiescent commit
-
-- **Pyramid (L0–L6)** in `common`: acyclic module layers; gateway uses **`facade` only**.
-  Detail: [`docs/library-reorg.md`](docs/library-reorg.md).
-- **Cut** — one **snapshot** of the digital twin at an instant:
-  `(FsmState, VehicleContext)` — operational mode plus the full summated world (headlamp, lux,
-  powertrain, health, …). The ledger records **hops between cuts**; quiescence ends on a
-  **stable cut** where no further internal hop is pending.
-- **Quiescence** — after zone embeds merge, the BrainTwin may apply **several FSM hops** (e.g.
-  external lux event → incomplete lamp embed → **internal** `LightingUnsafe` →
-  `DrivingDangerously`) before the twin reaches a **stable cut**. Each hop gets **one ledger row**;
-  **one** `apply_step` applies the final cut. Detail: [`docs/adr-007-fsm-quiescence-and-cut.md`](docs/adr-007-fsm-quiescence-and-cut.md).
-- **Spontaneous (twinlet-initiated)** — a twinlet reports on its **own deadline** without a new
-  external ingress event, e.g. **`HeadlampActor`** ACK wait fires →
-  `DigitalTwinCarVocabulary::HeadlampZoneSpontaneous` → BrainTwin commits an incomplete-lamp hop.
-  Contrasts with **correlated tell-back** (`HeadlampZoneReady`) after a BrainTwin **tell**.
-
-BrainTwin ↔ **`HeadlampActor`** use **enumerated mailbox types only** on the production path (no
-shared in-process L1 calls across the actor boundary). ACK wait is actor-owned (`send_after`), not
-gateway `TimerTick`.
+- **Pyramid** — see **Vocabulary**; gateway uses **`common::facade` only** (`scripts/check-gateway-facade-imports.sh`).
+- Production path: enumerated mailboxes to **`HeadlampActor`**; ACK wait via twinlet `send_after`, not gateway `TimerTick`.
+- **Quiescence** / **cut** / **spontaneous** — see **Vocabulary**; ADR: [`docs/adr-007-fsm-quiescence-and-cut.md`](docs/adr-007-fsm-quiescence-and-cut.md).
 
 ---
 
@@ -179,33 +153,17 @@ that speaks both wire and twin.
 > **Diagram (planned):** internal layout of the BrainTwin and twinlets inside the digital twin
 > capsule — to be added alongside this overview.
 
-### Vocabulary (read this before the diagrams)
-
-| Term                  | Meaning in this repo                                                                                                                                        |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Zone**              | SDV term: a vehicle concern partition. Code: **zone assembly** — `{Zone}Context` in `VehicleContext` (ADR-5).                                               |
-| **Twinlet**           | **Our term:** one zone as a **child actor** under the BrainTwin (mailbox + local timers).                                                                   |
-| **BrainTwin / Brain** | **Our term:** the digital twin overall — parent actor (`VirtualCarActor`), FSM commit, ledger, actuation. **`DigitalTwinCar`** = its state capsule.         |
-| **`HeadlampActor`**   | The **only twinlet** in this iteration — headlamp zone.                                                                                                     |
-| **Tell**              | BrainTwin → twinlet message; **fire-and-forget** — no reply port on that hop, so the BrainTwin mailbox stays free until **tell-back** or tell-back timeout. |
-| **Tell-back**         | Twinlet → BrainTwin reply, correlated by `turn_id` / `tell_attempt` (e.g. `HeadlampZoneReady`).                                                             |
-| **Quiescence**        | Multi-hop resolve (zone merge + `step` + detectors) until stable; then one `apply_step`.                                                                    |
-| **Spontaneous**       | Twinlet-initiated tell-back (e.g. ACK timer), not a new CAN ingress event.                                                                                  |
-| **Cut**               | Snapshot `(FsmState, VehicleContext)` at one instant; ledger rows are hops between cuts.                                                                    |
-
 **Ingress:** CAN → `PhysicalCarVocabulary` → projector → `DigitalTwinCarVocabulary::Fsm` →
-**BrainTwin** → (if demux routes headlamp) **tell `HeadlampActor`** → tell-back →
-**`commit_resolved_turn`**.
+**BrainTwin** → **tell** `HeadlampActor` → **tell-back** → **`commit_resolved_turn`**.
 
 **Egress:** `DomainAction` → `DefaultActuationManager` → `ActuationCommand` → CAN CMD → actuator
 → ACK/NACK → ingress again as confirmed / rejected / incomplete facts.
 
 ### End-to-end sequence (gateway → BrainTwin → headlamp twinlet → quiescence → sink)
 
-The runtime is **message-driven**, not one nested call stack. A **tell** is **fire-and-forget**; the
+The runtime is **message-driven**, not one nested call stack (see **Tell** in **Vocabulary**). The
 BrainTwin **handle() returns** while `pending_turn` waits for tell-back. CAN and the actuator add
-**separate wall-clock paths**. Solid arrows = one mailbox delivery; dashed = **later** delivery
-(another handle pass or CAN round-trip).
+**separate wall-clock paths**. Solid arrows = one mailbox delivery; dashed = **later** delivery.
 
 Example: low lux while driving — two main storylines (happy ACK vs timeout) share the same **Turn A**
 lux commit; **Turn B** is a distinct ingress or spontaneous message.
