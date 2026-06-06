@@ -202,34 +202,53 @@ that speaks both wire and twin.
 
 ### End-to-end sequence (gateway → BrainTwin → headlamp twinlet → quiescence → sink)
 
-Example: low lux while driving — BrainTwin tells headlamp twinlet, commits embed, emits ledger row(s), sends CMD.
+The runtime is **message-driven**, not one nested call stack. A **tell** is **fire-and-forget**; the
+BrainTwin **handle() returns** while `pending_turn` waits for tell-back. CAN and the actuator add
+**separate wall-clock paths**. Solid arrows = one mailbox delivery; dashed = **later** delivery
+(another handle pass or CAN round-trip).
+
+Example: low lux while driving — two main storylines (happy ACK vs timeout) share the same **Turn A**
+lux commit; **Turn B** is a distinct ingress or spontaneous message.
 
 ```mermaid
 sequenceDiagram
     participant CAN as vcan0
-    participant GW as Gateway runtime
-    participant Brain as BrainTwin (VirtualCarActor)
-    participant HL as HeadlampActor (twinlet)
-    participant Act as front_headlamp_actuator
-    participant Sink as Injected sinks
+    participant GW as Gateway
+    participant Brain as BrainTwin
+    participant HL as Headlamp twinlet
+    participant Act as Actuator
+    participant Sink as Sinks
 
-    CAN->>GW: AmbientLux frame
-    GW->>Brain: Fsm(UpdateAmbientLux)
-    Brain->>HL: tell Apply (HeadlampMessage)
-    HL->>HL: HeadlampContext::on_receiving_message
-    HL->>Brain: HeadlampZoneReady (embed)
-    Brain->>Brain: commit_resolved_turn / run_to_quiescence
-    Brain->>Sink: PublishedTransitionRecord (per hop)
-    Brain->>GW: DomainAction RequestFrontHeadlampOn
-    GW->>CAN: CMD ON
-    CAN->>Act: CMD ON
-    Act->>CAN: ACK (after delay)
-    CAN->>GW: ACK ingress
-    GW->>Brain: FrontHeadlampCommandConfirmed
-    Note over HL: If ACK missing: HL fires HeadlampZoneSpontaneous
-    HL->>Brain: HeadlampZoneSpontaneous (timeout path)
-    Brain->>Brain: quiescence (e.g. DrivingDangerously hop)
-    Brain->>Sink: further ledger row(s)
+    rect rgb(235, 245, 255)
+        Note over CAN,Sink: Turn A — lux ingress (three mailbox passes)
+        CAN->>GW: AmbientLux frame
+        GW->>Brain: ① Fsm(UpdateAmbientLux)
+        Brain->>HL: ② tell Apply (fire-and-forget)
+        Note over Brain: handle() returns · pending_turn · mailbox free
+        HL->>HL: on_receiving_message (twinlet handle)
+        HL-->>Brain: ③ HeadlampZoneReady (tell-back)
+        Note over Brain: new handle · commit_resolved_turn
+        Brain->>Brain: run_to_quiescence · apply_step
+        Brain->>Sink: try_emit ledger hop(s)
+        Brain->>GW: actuation cmd (async channel)
+        GW->>CAN: CMD ON
+    end
+
+    rect rgb(245, 255, 235)
+        Note over CAN,Brain: Turn B (happy) — later CAN round-trip (~150ms+)
+        CAN->>Act: CMD ON
+        Act-->>CAN: ACK
+        CAN->>GW: ACK frame
+        GW-->>Brain: ④ FrontHeadlampCommandConfirmed
+        Note over Brain: separate quiescent commit (lamp On)
+    end
+
+    rect rgb(255, 240, 240)
+        Note over HL,Brain: Turn B (timeout) — alternative to ACK
+        HL-->>Brain: ④ HeadlampZoneSpontaneous (ACK timer)
+        Note over Brain: new handle · quiescence (e.g. DrivingDangerously)
+        Brain->>Sink: further ledger hop(s)
+    end
 ```
 
 Sink wiring is chosen **once at gateway startup** (default: diagnostics → stdout; ledger-only:
@@ -343,7 +362,7 @@ Three **separate** roles (which pyramid layer owns each — see
 | **`DrivingDangerously`**      | Driving in dark without confirmed headlamp ON (latched); buzzer until recovery. |
 
 ```text
-Off ──PowerOn──► Idle ◄──stationary── Driving ◄────────────────────────┐
+Off ──PowerOn──► Idle ◄──stationary── Driving    ◄────────────────────────┐
                   ▲                    │                                  │
                   │                    ├── stress ──► ExtremeOperationWarning
                   │                    │                                  │
